@@ -1,0 +1,10 @@
+[package]
+name = "branchedit"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+logtree = { path = "../logtree" }
+
+[dev-dependencies]
+rand = "0.9.0"
