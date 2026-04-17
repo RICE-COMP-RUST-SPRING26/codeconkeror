@@ -14,6 +14,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::StreamExt;
 
 use crate::branches::{BranchEvent, BranchManager, BroadcastError, Broadcaster, SerializedPatch};
+use crate::types::DocumentPos;
 use crate::encoding::PatchEntry;
 use crate::patch::Patch;
 use crate::types::{Branch as BranchNum, ClientId, DocumentId, Version};
@@ -221,8 +222,10 @@ struct PatchRequest {
     branch_num: Option<BranchNum>,
     client_id: String,
     prev_seq_num: Version,
-    #[serde(with = "crate::serialize")]
-    patch: Patch,
+    #[serde(default, with = "crate::serialize::option_patch")]
+    patch: Option<Patch>,
+    #[serde(default)]
+    cursor: Option<DocumentPos>,
     #[serde(default)]
     metadata: Option<serde_json::Value>,
 }
@@ -255,7 +258,7 @@ async fn patch_document(
         doc_id, branch_num, client_id, req.prev_seq_num
     );
     let result = branch
-        .patch(client_id, req.prev_seq_num, req.patch, metadata)
+        .patch(client_id, req.prev_seq_num, req.patch, req.cursor, metadata)
         .map_err(ApiError::from)?;
 
     let rebased = result

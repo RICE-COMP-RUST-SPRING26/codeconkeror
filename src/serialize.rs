@@ -39,6 +39,30 @@ pub fn serialize_patch<S: Serializer>(patch: &Patch, serializer: S) -> Result<S:
     wrapper.serialize(serializer)
 }
 
+/// Serde glue for `Option<Patch>`, usable as `#[serde(with = "crate::serialize::option_patch")]`.
+pub mod option_patch {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(patch: &Option<Patch>, serializer: S) -> Result<S::Ok, S::Error> {
+        match patch {
+            Some(p) => serialize_patch(p, serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Patch>, D::Error> {
+        let opt = Option::<serde_json::Value>::deserialize(deserializer)?;
+        match opt {
+            None => Ok(None),
+            Some(v) => {
+                let s = v.to_string();
+                let mut de = serde_json::Deserializer::from_str(&s);
+                deserialize_patch(&mut de).map(Some).map_err(serde::de::Error::custom)
+            }
+        }
+    }
+}
+
 pub fn deserialize_patch<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Patch, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]

@@ -79,7 +79,7 @@ fn transform(&self, other: &Patch) -> Result<(Patch, Patch), String>;
 pub type Version = logtree::SeqNum;
 pub type Branch = logtree::BranchNum;
 pub type ClientId = u128;
-pub type DocumentPos = usize;
+pub type DocumentPos = u64;
 pub type DocumentId = u128;
 ```
 
@@ -130,8 +130,8 @@ Handles storing branches
 ## Events
 ```rust
 enum BranchEvent {
-    // Some other client sent a patch
-    ExternalPatch { seqnum, patch },
+    // Some other client sent an update
+    ExternalUpdate { seqnum, patch (optional), cursor (optional) },
     // Contains OTed versions of the patches the client will need
     // to apply to get back up to date
     ConfirmPatch { seqnum, rebased: Vec<Patch> },
@@ -145,8 +145,16 @@ struct Broadcaster {
 
 ## Branch
 ```rust
+struct BranchCursor {
+    client_id,
+    position: DocumentPos,
+    // The metadata that went along with the patch request which set the most recent cursor location
+    metadata: serde_json::Value,
+}
+
 struct BranchState {
     snapshot: String,
+    cursors: HashMap<ClientId, BranchCursor>,
     connections: Vec<Broadcaster>,
     seq_num: SeqNum,
     cached_patches: Deque<(SeqNum, Patch)>, // N most recent patches
@@ -162,17 +170,25 @@ Branch::new(tree: Arc<LogTree>, branch_num, seq_num, content: String)
 
 // The node prev_seq_num should already exist in the tree: the patch was applied after it.
 // If there have been patches since, apply OT to get a new version of the patch
-fn Branch::patch(&mut self, prev_seq_num, patch, metadata) -> Vec<Patch>
+fn Branch::patch(&mut self, client_id, prev_seq_num, patch (optional), cursor (optional), metadata: serde_json::Value) -> Vec<Patch>
 // 1. Lock the BranchState for the remainder of the function
 // 2. Ensure that state.seq_num >= prev_seq_num
 // 3. Get all patches in the range (prev_seq_num, state.seq_num], either cached, or from the LogTree
-// 4. Start with patch_prime=patch, then for each committed_patch in this range:
-// 4.1. (committed_prime, patch_prime) = transform(committed_patch, patch_prime)
-// 4.2. Collect committed_prime into a vector 'rebased'
-// 5. Append a new PatchEntry with patch=patch_prime, metadata, and the current time to the tree
+// 4. If cursor is provided:
+// 4.1. Transform the cursor by the patches in the range to get the rebased cursor position
+// 4.2. Store the transformed cursor in the cursors map
+// 5. If patch is provided:
+// 5.2. Start with patch_prime=patch, then for each committed_patch in this range:
+// 5.2.1. (committed_prime, patch_prime) = transform(committed_patch, patch_prime)
+// 5.2.2. Collect committed_prime into a vector 'rebased'
+// 5.3. Append a new PatchEntry with patch=patch_prime, metadata, and the current time to the tree
 // 6. For each broadcaster:
-// 6.1. If the client id matches, send a ConfirmPatch, and the new latest seq_num
-// 6.2. Otherwise, send an ExternalPatch with patch_prime
+// 6.1. If the client id matches, and patch is provided, send a ConfirmPatch, and the new latest seq_num
+// 6.2. Otherwise, send an ExternalUpdate with patch_prime (if it exists) and transformed cursor (if it exists)
+// 6.3. If sending it returned Err, remove the connection from the connection list
+// 7. For all removed connections, check if there are no more connections with that client id. If so:
+// 7.1. Remove the cursor for that client_id.
+// 7.2. Recursively call Branch::patch, with client_id=removed client id, prev_seq_num = state.seq_num, patch=None, cursor=None, and metadata={}. This will update all clients that this client is dead
 ```
 
 ## Branch manager
@@ -200,6 +216,11 @@ fn create_document(&self, content: &str, metadata: serde_json::Value) -> Result<
 // 1. With the storage locked, call create logtree
 // 2. Add a patch to the logtree adding a new PatchEntry containing content and metadata to the default branch
 // 3. With branches write-locked, add a new entry for the default branch
+
+fn add_branch(&self, docid, parent_branch: BranchNum, parent_seq: Version) -> Result<BranchNum>
+// 1. With the storage locked, call get_logtree
+// 2. Call tree.create_branch(parent_branch, parent_seq) to create the new branch
+// 3. Return the new branch number
 ```
 
 # Module src/web_api.rs
@@ -230,7 +251,14 @@ GET documents/DOCID (mode=subscribe) { branch_num (optional), client_id }
 // 3.1. Send the Init SSE event
 // 3.2. Add the broadcaster to the vec of broadcasters
 
-PATCH documents/DOCID { branch_num (optional), client_id, prev_seq_num, patch, metadata (optional) }
+PATCH documents/DOCID {
+  branch_num (optional),
+  client_id,
+  prev_seq_num,
+  cursor: number (optional),
+  patch (optional),
+  metadata (optional) 
+}
 // 1. Call open_branch
 // 2. Call branch.patch(...)
 
@@ -246,7 +274,13 @@ GET document/DOCID/nodes { branchNum (optional), start: SeqNum, end: SeqNum }
 // 1. Call BRANCH_MANAGER.get_document_tree(...)
 // 2. Call tree.read_range to get the nodes
 // 3. Parse each node to get the correct format, and return it
+
+POST documents/DOCID/branches { parent_branch (optional, defaults to 0), parent_seq: Version }
+-> { branch_num: BranchNum }
+// 1. Call BRANCH_MANAGER.add_branch(doc_id, parent_branch, parent_seq)
+// 2. Return the new branch number
 ```
+
 # Webapp
 The old webapp looked like this, the new one should look pretty much the same.
 [[./webapp.png]]
@@ -257,17 +291,43 @@ Also the info currently displayed below the textbox should be moved above (excep
 
 The webapp should have the following synchronization format:
 ```typescript
-type DispatchedPatch = {
-patch: Patch,
-documentBeforePatch: string,
-documentAfterPatch: string,
-externalPatchesSinceDispatch: Patch[],
-}
+class ClientDocumentManager {
+    // For a document that the webapp is currently subscribed to, it should store this state
+    dispatched: {
+        patch: Patch,
+        // The patch after various external patches have been applied
+        transformedPatch: Patch,
+        // The state of the document before the patch
+        documentBeforePatch: string,
+        // What we EXPECT the content to be, assuming this is the next patch applied.
+        // Updated each time an external patch comes in
+        documentAfterPatch: string,
+    } | null,
 
-// For a document that the webapp is currently subscribed to, it should store this state
-dispatched: DispatchedPatch | null,
-// The last known sequence number and content at that time
-lastComittedState: { seqNum: number, content: string }
+    // The last known sequence number, and the content at that time
+    lastComittedState: { seq: number, content: string },
+
+    // The current content displayed to the user
+    currentState: { content: string, cursor: number }
+    setCurrentState(content, cursor)
+
+    otherCursors: { clientId: number, name: string, pos: number }[]
+
+    onExternalPatch(seq, external: Patch)
+    // 1. Assert that seq = lastCommittedState.seq + 1
+    // 2. Update lastCommittedState.content by applying the external
+    // 3. (externalPrime, patchPrime) = transform(external, dispatched.transformedPatch)
+    // 4. Set lastCommittedState.seq to seq
+    // 4. Calculate "sinceCommit" by diffing lastCommitState.content with currentState
+    // 5. 
+    // Rebase sinceCommit by patch to get sinceCommitPrime
+    // Apply sinceCommitPrime to lastComittedState.content to determine the new document content
+
+    onConfirmPatch()
+    // Set last committed state to { content: dispatched.documentAfterPatch, seq: what it was before + 1 }
+    // Set dispatched to null
+    // Ignore the content of the event, we don't need it
+}
 ```
 
 *Sending a patch:*

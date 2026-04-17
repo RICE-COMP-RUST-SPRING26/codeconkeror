@@ -62,4 +62,34 @@ impl Patch {
     pub fn diff(before: &str, after: &str) -> Self {
         return diff::diff(before, after);
     }
+
+    /// Transform a cursor position through this patch.
+    /// If the cursor falls inside a deleted region it is pushed to the region's start.
+    pub fn transform_cursor(&self, cursor: u64) -> u64 {
+        let mut input_pos: u64 = 0;
+        let mut output_pos: u64 = 0;
+        for op in &self.ops {
+            match op {
+                OpComponent::Retain(n) => {
+                    let n = *n as u64;
+                    if cursor < input_pos + n {
+                        return output_pos + (cursor - input_pos);
+                    }
+                    input_pos += n;
+                    output_pos += n;
+                }
+                OpComponent::Insert(s) => {
+                    output_pos += s.len() as u64;
+                }
+                OpComponent::Delete(n) => {
+                    let n = *n as u64;
+                    if cursor < input_pos + n {
+                        return output_pos;
+                    }
+                    input_pos += n;
+                }
+            }
+        }
+        output_pos
+    }
 }

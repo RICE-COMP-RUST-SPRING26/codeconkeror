@@ -7,7 +7,7 @@ use crate::encoding::PatchEntry;
 use crate::logtrees::{LogTree, LogtreeStorage};
 use crate::patch::Patch;
 use crate::replay;
-use crate::types::{Branch as BranchNum, ClientId, DocumentId, Version};
+use crate::types::{Branch as BranchNum, ClientId, DocumentId, DocumentPos, Version};
 
 const CACHE_CAPACITY: usize = 512;
 
@@ -16,12 +16,20 @@ const CACHE_CAPACITY: usize = 512;
 #[derive(Serialize, Clone, Debug)]
 #[serde(tag = "type")]
 pub enum BranchEvent {
-    #[serde(rename = "external_patch")]
-    ExternalPatch {
-        seqnum: Version,
-        #[serde(with = "crate::serialize")]
-        patch: Patch,
+    #[serde(rename = "external_update")]
+    ExternalUpdate {
+        // Present iff a patch was committed
+        #[serde(skip_serializing_if = "Option::is_none")]
+        seqnum: Option<Version>,
+        #[serde(
+            skip_serializing_if = "Option::is_none",
+            with = "crate::serialize::option_patch"
+        )]
+        patch: Option<Patch>,
         client_id: String,
+        // Some(Some(pos)) = cursor at pos, Some(None) = cursor removed, None = no cursor change
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cursor: Option<Option<DocumentPos>>,
         metadata: serde_json::Value,
     },
     #[serde(rename = "confirm_patch")]
@@ -50,8 +58,14 @@ pub struct Broadcaster {
 
 // ==================== Branch ====================
 
+pub struct BranchCursor {
+    pub position: DocumentPos,
+    pub metadata: serde_json::Value,
+}
+
 pub struct BranchState {
     pub snapshot: String,
+    pub cursors: HashMap<ClientId, BranchCursor>,
     pub connections: Vec<Broadcaster>,
     pub seq_num: Version,
     pub cached_patches: VecDeque<(Version, Patch)>,
@@ -80,6 +94,7 @@ impl Branch {
             branch_num,
             state: Mutex::new(BranchState {
                 snapshot: content,
+                cursors: HashMap::new(),
                 connections: Vec::new(),
                 seq_num,
                 cached_patches: VecDeque::new(),
@@ -97,7 +112,8 @@ impl Branch {
         &self,
         client_id: ClientId,
         prev_seq_num: Version,
-        patch: Patch,
+        patch: Option<Patch>,
+        cursor: Option<DocumentPos>,
         metadata: serde_json::Value,
     ) -> Result<PatchResult, String> {
         let mut st = self.state.lock().unwrap();
@@ -112,63 +128,102 @@ impl Branch {
         // Collect committed patches in (prev_seq_num, state.seq_num]
         let committed = collect_patches(&self.tree, self.branch_num, &st, prev_seq_num)?;
 
+        // Transform cursor through committed patches and store it.
+        let rebased_cursor = cursor.map(|mut pos| {
+            for p in &committed {
+                pos = p.transform_cursor(pos);
+            }
+            pos
+        });
+        if let Some(pos) = rebased_cursor {
+            st.cursors.insert(client_id, BranchCursor { position: pos, metadata: metadata.clone() });
+        }
+
         // OT the incoming patch against each committed patch.
-        let mut patch_prime = patch;
-        let mut rebased: Vec<Patch> = Vec::with_capacity(committed.len());
-        for committed_patch in committed.iter() {
-            let (committed_prime, new_patch_prime) = committed_patch.transform(&patch_prime)?;
-            rebased.push(committed_prime);
-            patch_prime = new_patch_prime;
-        }
+        let (patch_prime, rebased, new_seq) = if let Some(patch) = patch {
+            let mut patch_prime = patch;
+            let mut rebased: Vec<Patch> = Vec::with_capacity(committed.len());
+            for committed_patch in committed.iter() {
+                let (committed_prime, new_patch_prime) = committed_patch.transform(&patch_prime)?;
+                rebased.push(committed_prime);
+                patch_prime = new_patch_prime;
+            }
 
-        // Apply to snapshot
-        let new_snapshot = patch_prime.apply(&st.snapshot)?;
+            let new_snapshot = patch_prime.apply(&st.snapshot)?;
 
-        // Append to the log tree
-        let entry = PatchEntry::new(patch_prime.clone(), metadata.clone());
-        let bytes = entry.to_bytes();
-        let _logged_seq = self
-            .tree
-            .append_to_branch(self.branch_num, &bytes)
-            .map_err(|e| format!("{e}"))?;
+            let entry = PatchEntry::new(patch_prime.clone(), metadata.clone());
+            let bytes = entry.to_bytes();
+            self.tree
+                .append_to_branch(self.branch_num, &bytes)
+                .map_err(|e| format!("{e}"))?;
 
-        st.seq_num += 1;
-        let new_seq = st.seq_num;
-        st.snapshot = new_snapshot;
+            st.seq_num += 1;
+            let new_seq = st.seq_num;
+            st.snapshot = new_snapshot;
 
-        // Update cache
-        st.cached_patches.push_back((new_seq, patch_prime.clone()));
-        while st.cached_patches.len() > CACHE_CAPACITY {
-            st.cached_patches.pop_front();
-        }
+            st.cached_patches.push_back((new_seq, patch_prime.clone()));
+            while st.cached_patches.len() > CACHE_CAPACITY {
+                st.cached_patches.pop_front();
+            }
+
+            (Some(patch_prime), rebased, Some(new_seq))
+        } else {
+            (None, Vec::new(), None)
+        };
 
         // Broadcast
         let originator_client_id = format!("{:032x}", client_id);
         let rebased_serialized: Vec<SerializedPatch> =
             rebased.iter().cloned().map(|p| SerializedPatch { patch: p }).collect();
 
+        // Track connections that failed so we can clean up cursors afterwards.
+        let mut dead_clients: Vec<ClientId> = Vec::new();
+
         st.connections.retain(|conn| {
             let event = if conn.client_id == client_id {
-                BranchEvent::ConfirmPatch {
-                    seqnum: new_seq,
-                    rebased: rebased_serialized.clone(),
+                if let Some(seq) = new_seq {
+                    BranchEvent::ConfirmPatch { seqnum: seq, rebased: rebased_serialized.clone() }
+                } else {
+                    return true; // cursor-only: no need to echo back to sender
                 }
             } else {
-                BranchEvent::ExternalPatch {
+                BranchEvent::ExternalUpdate {
                     seqnum: new_seq,
                     patch: patch_prime.clone(),
                     client_id: originator_client_id.clone(),
+                    cursor: rebased_cursor.map(Some),
                     metadata: metadata.clone(),
                 }
             };
-            log::info!(
-                "broadcast to client {:032x}: {:?}",
-                conn.client_id, event
-            );
-            (conn.send)(event).is_ok()
+            log::info!("broadcast to client {:032x}: {:?}", conn.client_id, event);
+            let ok = (conn.send)(event).is_ok();
+            if !ok {
+                dead_clients.push(conn.client_id);
+            }
+            ok
         });
 
-        Ok(PatchResult { new_seq, rebased })
+        // Clean up cursors for clients whose last connection just died.
+        for dead_id in dead_clients {
+            let still_connected = st.connections.iter().any(|c| c.client_id == dead_id);
+            if !still_connected {
+                st.cursors.remove(&dead_id);
+                // Notify remaining connections that this cursor is gone.
+                let dead_id_str = format!("{:032x}", dead_id);
+                st.connections.retain(|conn| {
+                    let event = BranchEvent::ExternalUpdate {
+                        seqnum: None,
+                        patch: None,
+                        client_id: dead_id_str.clone(),
+                        cursor: Some(None), // explicit null = cursor removed
+                        metadata: serde_json::json!({}),
+                    };
+                    (conn.send)(event).is_ok()
+                });
+            }
+        }
+
+        Ok(PatchResult { new_seq: new_seq.unwrap_or(st.seq_num), rebased })
     }
 }
 
