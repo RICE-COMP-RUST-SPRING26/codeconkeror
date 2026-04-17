@@ -21,14 +21,20 @@ export type NodeSummary = {
 
 export type ClientStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
 
+export type DispatchedPatch = {
+  patch: Patch;
+  documentBeforePatch: string;
+  documentAfterPatch: string;
+  externalPatchesSinceDispatch: Patch[];
+};
+
 export type ClientObservableState = {
   displayedContent: string;
-  confirmedContent: string;
-  confirmedSeq: number;
-  branchNum: number;
-  hasPending: boolean;
-  pending: Patch | null;
+  lastCommittedState: { seqNum: number; content: string };
+  dispatched: DispatchedPatch | null;
+  rebasedDispatched: Patch | null;
   queued: Patch;
+  branchNum: number;
   clientId: string;
   connStatus: ClientStatus;
   initialized: boolean;

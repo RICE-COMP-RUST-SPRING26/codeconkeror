@@ -6,7 +6,7 @@ import {
   isIdentity,
   outputLen,
 } from './ot';
-import type { Patch, ClientObservableState, EventLogEntry, BranchSummary, NodeSummary } from './types';
+import type { Patch, ClientObservableState, EventLogEntry, BranchSummary, NodeSummary, DispatchedPatch } from './types';
 
 function patchSummary(patch: Patch): string {
   return patch.ops
@@ -44,15 +44,17 @@ export class DocumentClient {
   private onStateCb: (s: ClientObservableState) => void;
   private onEventCb: (e: Omit<EventLogEntry, 'id' | 'time'>) => void;
 
-  confirmedContent = '';
-  confirmedSeq = 0;
-  pending: Patch | null = null;
+  lastCommittedState = { seqNum: 0, content: '' };
+  dispatched: DispatchedPatch | null = null;
+  // Incrementally maintained rebased version of dispatched.patch — updated on each
+  // external so we don't recompute the full transform chain from scratch each time.
+  private _rebasedDispatched: Patch | null = null;
   queued: Patch = identityPatch(0);
   displayedContent = '';
   initialized = false;
   connStatus: ClientObservableState['connStatus'] = 'disconnected';
 
-  sendDelay = 0; // ms; 0 = immediate
+  sendDelay = 0;
   private _sendTimer: ReturnType<typeof setTimeout> | null = null;
 
   private eventSource: EventSource | null = null;
@@ -76,22 +78,21 @@ export class DocumentClient {
   }
 
   private _computeDisplayed(): string {
-    const withPending = this.pending
-      ? applyPatch(this.pending, this.confirmedContent)
-      : this.confirmedContent;
-    return applyPatch(this.queued, withPending);
+    const base = this._rebasedDispatched
+      ? applyPatch(this._rebasedDispatched, this.lastCommittedState.content)
+      : this.lastCommittedState.content;
+    return applyPatch(this.queued, base);
   }
 
   private _notify() {
     this.displayedContent = this._computeDisplayed();
     this.onStateCb({
       displayedContent: this.displayedContent,
-      confirmedContent: this.confirmedContent,
-      confirmedSeq: this.confirmedSeq,
-      branchNum: this.branchNum,
-      hasPending: !!this.pending,
-      pending: this.pending,
+      lastCommittedState: this.lastCommittedState,
+      dispatched: this.dispatched,
+      rebasedDispatched: this._rebasedDispatched,
       queued: this.queued,
+      branchNum: this.branchNum,
       clientId: this.clientId,
       connStatus: this.connStatus,
       initialized: this.initialized,
@@ -137,10 +138,10 @@ export class DocumentClient {
       const content = data.content as string;
       const seqNum = data.seq_num as number;
       const branchNum = data.branch_num as number;
-      this.confirmedContent = content;
-      this.confirmedSeq = seqNum;
+      this.lastCommittedState = { seqNum, content };
       this.branchNum = branchNum;
-      this.pending = null;
+      this.dispatched = null;
+      this._rebasedDispatched = null;
       this.queued = identityPatch(content.length);
       this.initialized = true;
       this.onEventCb({ direction: 'in', type: 'init', detail: `seq=${seqNum} branch=${branchNum}` });
@@ -162,9 +163,8 @@ export class DocumentClient {
 
     if (data.event === 'branch' && type === 'confirm_patch') {
       const seqnum = data.seqnum as number;
-      const rebased = (data.rebased as Array<{ patch: Patch }> | undefined) ?? [];
       this.onEventCb({ direction: 'in', type: 'confirm', detail: `seq=${seqnum}` });
-      this._applyConfirm(seqnum, rebased);
+      this._applyConfirm(seqnum);
       this._notify();
       this._maybePromoteAndSend();
       return;
@@ -172,63 +172,81 @@ export class DocumentClient {
   }
 
   private _applyExternal(patch: Patch, seqnum: number) {
-    if (this.pending) {
-      const [pendingPrime, externalForOurSide] = transformPatches(this.pending, patch);
-      this.confirmedContent = applyPatch(patch, this.confirmedContent);
-      const [, queuedPrime] = transformPatches(externalForOurSide, this.queued);
-      this.pending = pendingPrime;
+    if (this.dispatched && this._rebasedDispatched) {
+      // Rebase _rebasedDispatched against the incoming external, yielding both the
+      // updated rebased dispatched patch and the version of the external that applies
+      // after the dispatched patch (used to rebase the queued/unsent patch).
+      const [newRebasedD, extAfterDispatched] = transformPatches(this._rebasedDispatched, patch);
+      const [, queuedPrime] = transformPatches(extAfterDispatched, this.queued);
+      this._rebasedDispatched = newRebasedD;
       this.queued = queuedPrime;
+      this.dispatched.externalPatchesSinceDispatch.push(patch);
     } else {
-      this.confirmedContent = applyPatch(patch, this.confirmedContent);
       const [, queuedPrime] = transformPatches(patch, this.queued);
       this.queued = queuedPrime;
     }
-    this.confirmedSeq = seqnum;
+    this.lastCommittedState = {
+      seqNum: seqnum,
+      content: applyPatch(patch, this.lastCommittedState.content),
+    };
   }
 
-  private _applyConfirm(seqnum: number, rebased: Array<{ patch: Patch }>) {
-    if (this.pending) {
-      this.confirmedContent = applyPatch(this.pending, this.confirmedContent);
+  private _applyConfirm(seqnum: number) {
+    // Ignore the server's rebased array — all externals between prev_seq and this
+    // confirm have already arrived in order over SSE, so lastCommittedState is
+    // already up to date with those externals. We just need to advance it by our
+    // confirmed dispatched patch, which we already have rebased locally.
+    if (this._rebasedDispatched) {
+      this.lastCommittedState = {
+        seqNum: seqnum,
+        content: applyPatch(this._rebasedDispatched, this.lastCommittedState.content),
+      };
+    } else {
+      this.lastCommittedState = { ...this.lastCommittedState, seqNum: seqnum };
     }
-    for (const { patch: r } of rebased) {
-      this.confirmedContent = applyPatch(r, this.confirmedContent);
-      const [, queuedPrime] = transformPatches(r, this.queued);
-      this.queued = queuedPrime;
-    }
-    this.confirmedSeq = seqnum;
-    this.pending = null;
+    this.dispatched = null;
+    this._rebasedDispatched = null;
   }
 
   private _maybePromoteAndSend() {
-    if (this.pending || isIdentity(this.queued)) return;
+    if (this.dispatched || isIdentity(this.queued)) return;
     if (this.sendDelay > 0) {
-      if (this._sendTimer !== null) return; // already scheduled
+      if (this._sendTimer !== null) return;
       this._sendTimer = setTimeout(() => {
         this._sendTimer = null;
         this._enqueue(() => {
-          if (this.pending || isIdentity(this.queued)) return;
-          this.pending = this.queued;
-          this.queued = identityPatch(outputLen(this.pending));
-          this._notify();
-          void this._sendPending();
+          if (this.dispatched || isIdentity(this.queued)) return;
+          this._promoteAndSend();
         });
       }, this.sendDelay);
     } else {
-      this.pending = this.queued;
-      this.queued = identityPatch(outputLen(this.pending));
-      void this._sendPending();
+      this._promoteAndSend();
     }
   }
 
-  private async _sendPending() {
-    if (!this.pending) return;
+  private _promoteAndSend() {
+    const patch = this.queued;
+    this.dispatched = {
+      patch,
+      documentBeforePatch: this.lastCommittedState.content,
+      documentAfterPatch: applyPatch(patch, this.lastCommittedState.content),
+      externalPatchesSinceDispatch: [],
+    };
+    this._rebasedDispatched = patch;
+    this.queued = identityPatch(outputLen(patch));
+    this._notify();
+    void this._sendDispatched();
+  }
+
+  private async _sendDispatched() {
+    if (!this.dispatched) return;
     const body = {
       client_id: this.clientId,
-      prev_seq_num: this.confirmedSeq,
-      patch: this.pending,
+      prev_seq_num: this.lastCommittedState.seqNum,
+      patch: this.dispatched.patch,
       branch_num: this.branchNum,
     };
-    this.onEventCb({ direction: 'out', type: 'patch', detail: `seq=${this.confirmedSeq} ${patchSummary(this.pending)}` });
+    this.onEventCb({ direction: 'out', type: 'patch', detail: `seq=${this.lastCommittedState.seqNum} ${patchSummary(this.dispatched.patch)}` });
     try {
       const res = await fetch(`${this.serverUrl}/documents/${this.docId}`, {
         method: 'PATCH',
@@ -246,12 +264,12 @@ export class DocumentClient {
       const oldDisplayed = this._computeDisplayed();
       if (newText === oldDisplayed) return;
 
-      const confirmedWithPending = this.pending
-        ? applyPatch(this.pending, this.confirmedContent)
-        : this.confirmedContent;
-      this.queued = diffPatches(confirmedWithPending, newText);
+      const base = this._rebasedDispatched
+        ? applyPatch(this._rebasedDispatched, this.lastCommittedState.content)
+        : this.lastCommittedState.content;
+      this.queued = diffPatches(base, newText);
 
-      if (!this.pending) this._maybePromoteAndSend();
+      if (!this.dispatched) this._maybePromoteAndSend();
       this._notify();
     });
   }

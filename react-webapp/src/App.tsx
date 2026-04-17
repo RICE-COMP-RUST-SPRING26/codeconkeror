@@ -3,7 +3,7 @@ import { DocumentClient, createDocument, newClientId } from "./client";
 import { buildDebugSegments, buildDiffSegments, summarizePatch } from "./ot";
 import type { ClientObservableState, BranchSummary, NodeSummary, EventLogEntry } from "./types";
 
-const SERVER_URL = "http://bore.pub:27668";
+const SERVER_URL = "http://bore.pub:57009";
 const LS_CLIENT = "branchedit.clientId";
 
 function shortId(id: string) {
@@ -137,7 +137,10 @@ export default function App() {
         const client = clientRef.current;
         if (!client || !docId) return;
         try {
-            const res = await client.createBranch(client.confirmedSeq, client.branchNum);
+            const res = await client.createBranch(
+                client.lastCommittedState.seqNum,
+                client.branchNum,
+            );
             await refreshBranches();
             openDocument(docId, res.branch_num);
         } catch (e) {
@@ -177,7 +180,7 @@ export default function App() {
         if (!client || !state) return;
         setHistoryLoading(true);
         try {
-            const end = state.confirmedSeq;
+            const end = state.lastCommittedState.seqNum;
             if (end < 1) {
                 setHistoryNodes([]);
                 setShowHistory(true);
@@ -251,15 +254,9 @@ export default function App() {
             const client = clientRef.current;
             if (!client) return;
             const pos = autoInsertPosRef.current;
-            if (pos >= LOREM_IPSUM.length) {
-                clearInterval(autoInsertRef.current!);
-                autoInsertRef.current = null;
-                setIsAutoInserting(false);
-                return;
-            }
             const current = client.displayedContent;
             void client.userEdit(current + LOREM_IPSUM[pos]);
-            autoInsertPosRef.current = pos + 1;
+            autoInsertPosRef.current = (pos + 1) % LOREM_IPSUM.length;
         }, 80);
     }, [LOREM_IPSUM]);
 
@@ -356,8 +353,9 @@ export default function App() {
                 {/* ── Status line (ABOVE editor) ── */}
                 {clientState && (
                     <div className="mb-2 text-xs font-mono text-gray-600 bg-white border border-gray-200 rounded px-2 py-1">
-                        branch {clientState.branchNum} · seq {clientState.confirmedSeq} · pending:{" "}
-                        {clientState.hasPending ? (
+                        branch {clientState.branchNum} · seq {clientState.lastCommittedState.seqNum}{" "}
+                        · pending:{" "}
+                        {clientState.dispatched ? (
                             <span className="text-yellow-600 font-semibold">yes</span>
                         ) : (
                             "no"
@@ -444,8 +442,8 @@ export default function App() {
                         </div>
                         <pre className="text-sm font-mono whitespace-pre-wrap break-all leading-relaxed border border-gray-100 rounded p-2 bg-gray-50">
                             {buildDebugSegments(
-                                clientState.confirmedContent,
-                                clientState.pending,
+                                clientState.lastCommittedState.content,
+                                clientState.rebasedDispatched,
                                 clientState.queued,
                             ).map((seg, i) => (
                                 <span
@@ -465,17 +463,19 @@ export default function App() {
                         <div className="mt-2 text-xs text-gray-500 space-y-1">
                             <div>
                                 <span className="font-semibold">
-                                    lastCommitted ({clientState.confirmedSeq}):
+                                    lastCommitted ({clientState.lastCommittedState.seqNum}):
                                 </span>{" "}
                                 <span className="font-mono">
-                                    {JSON.stringify(clientState.confirmedContent.slice(0, 80))}
+                                    {JSON.stringify(
+                                        clientState.lastCommittedState.content.slice(0, 80),
+                                    )}
                                 </span>
                             </div>
-                            {clientState.pending && (
+                            {clientState.rebasedDispatched && (
                                 <div>
                                     <span className="font-semibold">dispatched patch:</span>{" "}
                                     <span className="font-mono">
-                                        {summarizePatch(clientState.pending)}
+                                        {summarizePatch(clientState.rebasedDispatched)}
                                     </span>
                                 </div>
                             )}
