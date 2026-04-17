@@ -26,7 +26,7 @@ pub fn router(state: AppState) -> Router {
         .route("/documents/{doc_id}", get(get_document).patch(patch_document))
         .route("/documents/{doc_id}/branches", get(list_branches).post(create_branch))
         .route("/documents/{doc_id}/nodes", get(list_nodes))
-        // Support the `document/` (no s) spellings from the design spec too.
+    // Support the `document/` (no s) spellings from the design spec too.
         .route("/document/{doc_id}/branches", get(list_branches).post(create_branch))
         .route("/document/{doc_id}/nodes", get(list_nodes))
         .with_state(state)
@@ -133,7 +133,7 @@ async fn get_document(
         seq_num: st.seq_num,
         branch_num,
     })
-    .into_response())
+       .into_response())
 }
 
 // ---------------- SSE subscribe ----------------
@@ -196,9 +196,16 @@ async fn subscribe(
 
     let combined = init_stream.chain(branch_stream);
 
-    Ok(Sse::new(combined)
+    let mut response = Sse::new(combined)
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
-        .into_response())
+        .into_response();
+
+    let headers = response.headers_mut();
+    headers.insert("Cache-Control", "no-cache, no-store".parse().unwrap());
+    headers.insert("X-Accel-Buffering", "no".parse().unwrap());
+    headers.insert("Access-Control-Allow-Origin","*".parse().unwrap());
+
+    Ok(response)
 }
 
 fn to_sse_event(evt: &SseEvent) -> Result<Event, Infallible> {

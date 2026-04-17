@@ -247,3 +247,51 @@ GET document/DOCID/nodes { branchNum (optional), start: SeqNum, end: SeqNum }
 // 2. Call tree.read_range to get the nodes
 // 3. Parse each node to get the correct format, and return it
 ```
+# Webapp
+The old webapp looked like this, the new one should look pretty much the same.
+[[./webapp.png]]
+
+The webapp has a Client ID which it randomly generates, and stores in session storage.
+The webapp should have a hard-coded constant for the server url, you should not have the server url be a textbox.
+Also the info currently displayed below the textbox should be moved above (except the history)
+
+The webapp should have the following synchronization format:
+```typescript
+type DispatchedPatch = {
+patch: Patch,
+documentBeforePatch: string,
+documentAfterPatch: string,
+externalPatchesSinceDispatch: Patch[],
+}
+
+// For a document that the webapp is currently subscribed to, it should store this state
+dispatched: DispatchedPatch | null,
+// The last known sequence number and content at that time
+lastComittedState: { seqNum: number, content: string }
+```
+
+*Sending a patch:*
+If dispatched is non-null, then another patch is pending, so don't send a patch.
+Determine what patch to send based on diffing the current content with lastComittedState.content
+Set DispatchedPatch, by using lastComittedState.content and the patch to be sent
+Send the patch request
+
+Then, each time an "external patch" SSE event comes in:
+We determine the "unsent patch", by diffing the current content with `dispatched.documentAfterPatch`.
+Then, we update `lastComittedState` to be `lastComittedState` with `event.patch` applied right after.
+We add `event.patch` to `dispatched.externalPatchesSinceDispatch`.
+We use operational transform to rebase `dispatched.patch` to after `externalPatchesSinceDispatch`.
+We use operational transform to rebase the user patch to after `externalPatchesSinceDispatch` and the rebased `dispatch.patch`.
+To calculate what to display to the user, we start with `lastComittedState`, then apply the rebased `dispatched.patch`, then the rebased user patch.
+
+Then, when we receive a "confirm patch", we know we are up to date. so we can actually ignore the data of the confirm patch, and just set dispatchedPatch to null. Then, we can check if the current content is different from the last comitted state, and if so we can choose to send another patch.
+
+*Some additional features not shown in the screenshot shoud include:*
+There should be a debug checkbox, which shows the lastComittedState, dispatched patch, and unsent changes in different colors in the text editor.
+There should be a log of events (SSE events and patch requests) for debugging.
+When the user presses "show history", it should show a branch of nodes, and an option to click any node and create a branch from that node, or if the node is a branch head, a button to switch to that branch.
+You should be able to "shadow" a branch, which means you are subscribed to that branch even though you are currently on a different branch. Then, it will show live inline in the text editor the diff of your current branch with that other branch, so you can "spy" on what other people are doing while being on your own separate branch.
+
+
+
+
