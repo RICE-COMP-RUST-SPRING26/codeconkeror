@@ -6,7 +6,23 @@ import {
   isIdentity,
   outputLen,
 } from './ot';
-import type { Patch, ClientObservableState, EventLogEntry, BranchSummary, NodeSummary, DispatchedPatch } from './types';
+import type {
+  Patch,
+  ClientObservableState,
+  EventLogEntry,
+  BranchSummary,
+  NodeSummary,
+  DispatchedPatch,
+  ExternalCursor,
+} from './types';
+
+function genHex(bytes: number): string {
+  const buf = new Uint8Array(bytes);
+  crypto.getRandomValues(buf);
+  return Array.from(buf).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+export function newClientId(): string { return genHex(16); }
 
 function patchSummary(patch: Patch): string {
   return patch.ops
@@ -19,52 +35,71 @@ function patchSummary(patch: Patch): string {
     .join(' ') || '(no change)';
 }
 
-function genHex(bytes: number): string {
-  const buf = new Uint8Array(bytes);
-  crypto.getRandomValues(buf);
-  return Array.from(buf).map(b => b.toString(16).padStart(2, '0')).join('');
+function transformCursorByPatch(cursor: number, patch: Patch): number {
+  let inputPos = 0;
+  let outputPos = 0;
+  for (const op of patch.ops) {
+    if ('retain' in op) {
+      if (cursor <= inputPos + op.retain) {
+        return outputPos + (cursor - inputPos);
+      }
+      inputPos += op.retain;
+      outputPos += op.retain;
+    } else if ('insert' in op) {
+      outputPos += op.insert.length;
+    } else if ('delete' in op) {
+      if (cursor < inputPos + op.delete) {
+        return outputPos;
+      }
+      inputPos += op.delete;
+    }
+  }
+  return outputPos + Math.max(0, cursor - inputPos);
 }
 
-export function newClientId(): string { return genHex(16); }
-
-type DocumentClientOptions = {
+type DocumentManagerOptions = {
   serverUrl: string;
   docId: string;
   branchNum?: number;
   clientId?: string;
+  name?: string;
   onState?: (state: ClientObservableState) => void;
   onEvent?: (entry: Omit<EventLogEntry, 'id' | 'time'>) => void;
 };
 
-export class DocumentClient {
+export class ClientDocumentManager {
   readonly serverUrl: string;
   readonly docId: string;
   branchNum: number;
   readonly clientId: string;
+  name: string;
+
   private onStateCb: (s: ClientObservableState) => void;
   private onEventCb: (e: Omit<EventLogEntry, 'id' | 'time'>) => void;
 
   lastCommittedState = { seqNum: 0, content: '' };
   dispatched: DispatchedPatch | null = null;
-  // Incrementally maintained rebased version of dispatched.patch — updated on each
-  // external so we don't recompute the full transform chain from scratch each time.
   private _rebasedDispatched: Patch | null = null;
   queued: Patch = identityPatch(0);
   displayedContent = '';
+  cursor = 0;
   initialized = false;
   connStatus: ClientObservableState['connStatus'] = 'disconnected';
+  externalCursors = new Map<string, ExternalCursor>();
 
   sendDelay = 0;
   private _sendTimer: ReturnType<typeof setTimeout> | null = null;
+  private _cursorSendTimer: ReturnType<typeof setTimeout> | null = null;
 
   private eventSource: EventSource | null = null;
   private _tail: Promise<void> = Promise.resolve();
 
-  constructor(opts: DocumentClientOptions) {
+  constructor(opts: DocumentManagerOptions) {
     this.serverUrl = opts.serverUrl.replace(/\/+$/, '');
     this.docId = opts.docId;
     this.branchNum = opts.branchNum ?? 0;
     this.clientId = opts.clientId ?? genHex(16);
+    this.name = opts.name ?? '';
     this.onStateCb = opts.onState ?? (() => {});
     this.onEventCb = opts.onEvent ?? (() => {});
   }
@@ -88,7 +123,7 @@ export class DocumentClient {
     this.displayedContent = this._computeDisplayed();
     this.onStateCb({
       displayedContent: this.displayedContent,
-      cursor: 0,
+      cursor: this.cursor,
       lastCommittedState: this.lastCommittedState,
       dispatched: this.dispatched,
       rebasedDispatched: this._rebasedDispatched,
@@ -97,7 +132,7 @@ export class DocumentClient {
       clientId: this.clientId,
       connStatus: this.connStatus,
       initialized: this.initialized,
-      externalCursors: new Map(),
+      externalCursors: new Map(this.externalCursors),
     });
   }
 
@@ -132,6 +167,7 @@ export class DocumentClient {
   disconnect() {
     if (this.eventSource) { this.eventSource.close(); this.eventSource = null; }
     if (this._sendTimer !== null) { clearTimeout(this._sendTimer); this._sendTimer = null; }
+    if (this._cursorSendTimer !== null) { clearTimeout(this._cursorSendTimer); this._cursorSendTimer = null; }
     this.connStatus = 'disconnected';
   }
 
@@ -153,13 +189,31 @@ export class DocumentClient {
 
     const type = data.type as string | undefined;
 
-    if (data.event === 'branch' && type === 'external_patch') {
-      const patch = data.patch as Patch;
-      const seqnum = data.seqnum as number;
-      this.onEventCb({ direction: 'in', type: 'external', detail: `seq=${seqnum} ${patchSummary(patch)}` });
-      this._applyExternal(patch, seqnum);
+    if (data.event === 'branch' && type === 'external_update') {
+      const patch = data.patch as Patch | undefined;
+      const cursorPos = data.cursor as number | undefined;
+      const cursorRemoved = data.cursor_removed as boolean | undefined;
+      const clientId = data.client_id as string | undefined;
+      const metadata = (data.metadata ?? {}) as Record<string, unknown>;
+      const seqnum = data.seqnum as number | undefined;
+
+      if (patch && seqnum !== undefined) {
+        this.onEventCb({ direction: 'in', type: 'external', detail: `seq=${seqnum} ${patchSummary(patch)}` });
+        this._applyExternal(patch, seqnum);
+      } else if (seqnum !== undefined) {
+        this.lastCommittedState = { ...this.lastCommittedState, seqNum: seqnum };
+      }
+
+      if (clientId !== undefined) {
+        if (cursorRemoved) {
+          this.onExternalCursorUpdate(clientId, metadata, null);
+        } else if (cursorPos !== undefined) {
+          this.onExternalCursorUpdate(clientId, metadata, cursorPos);
+        }
+      }
+
       this._notify();
-      this._maybePromoteAndSend();
+      if (patch) this._maybePromoteAndSend();
       return;
     }
 
@@ -175,9 +229,6 @@ export class DocumentClient {
 
   private _applyExternal(patch: Patch, seqnum: number) {
     if (this.dispatched && this._rebasedDispatched) {
-      // Rebase _rebasedDispatched against the incoming external, yielding both the
-      // updated rebased dispatched patch and the version of the external that applies
-      // after the dispatched patch (used to rebase the queued/unsent patch).
       const [newRebasedD, extAfterDispatched] = transformPatches(this._rebasedDispatched, patch);
       const [, queuedPrime] = transformPatches(extAfterDispatched, this.queued);
       this._rebasedDispatched = newRebasedD;
@@ -187,6 +238,7 @@ export class DocumentClient {
       const [, queuedPrime] = transformPatches(patch, this.queued);
       this.queued = queuedPrime;
     }
+    this.cursor = transformCursorByPatch(this.cursor, patch);
     this.lastCommittedState = {
       seqNum: seqnum,
       content: applyPatch(patch, this.lastCommittedState.content),
@@ -194,10 +246,6 @@ export class DocumentClient {
   }
 
   private _applyConfirm(seqnum: number) {
-    // Ignore the server's rebased array — all externals between prev_seq and this
-    // confirm have already arrived in order over SSE, so lastCommittedState is
-    // already up to date with those externals. We just need to advance it by our
-    // confirmed dispatched patch, which we already have rebased locally.
     if (this._rebasedDispatched) {
       this.lastCommittedState = {
         seqNum: seqnum,
@@ -208,6 +256,14 @@ export class DocumentClient {
     }
     this.dispatched = null;
     this._rebasedDispatched = null;
+  }
+
+  onExternalCursorUpdate(clientId: string, metadata: Record<string, unknown>, pos: number | null) {
+    if (pos === null) {
+      this.externalCursors.delete(clientId);
+    } else {
+      this.externalCursors.set(clientId, { pos, metadata });
+    }
   }
 
   private _maybePromoteAndSend() {
@@ -237,18 +293,22 @@ export class DocumentClient {
     this._rebasedDispatched = patch;
     this.queued = identityPatch(outputLen(patch));
     this._notify();
-    void this._sendDispatched();
+    void this._sendPatch(patch, this.cursor);
   }
 
-  private async _sendDispatched() {
-    if (!this.dispatched) return;
-    const body = {
+  private async _sendPatch(patch: Patch, cursor: number) {
+    const metadata: Record<string, unknown> = {};
+    if (this.name) metadata.name = this.name;
+
+    const body: Record<string, unknown> = {
       client_id: this.clientId,
       prev_seq_num: this.lastCommittedState.seqNum,
-      patch: this.dispatched.patch,
+      patch,
+      cursor,
       branch_num: this.branchNum,
+      metadata,
     };
-    this.onEventCb({ direction: 'out', type: 'patch', detail: `seq=${this.lastCommittedState.seqNum} ${patchSummary(this.dispatched.patch)}` });
+    this.onEventCb({ direction: 'out', type: 'patch', detail: `seq=${this.lastCommittedState.seqNum} ${patchSummary(patch)}` });
     try {
       const res = await fetch(`${this.serverUrl}/documents/${this.docId}`, {
         method: 'PATCH',
@@ -261,18 +321,55 @@ export class DocumentClient {
     }
   }
 
-  userEdit(newText: string) {
+  private async _sendCursorOnly(cursor: number) {
+    const metadata: Record<string, unknown> = {};
+    if (this.name) metadata.name = this.name;
+
+    const body: Record<string, unknown> = {
+      client_id: this.clientId,
+      prev_seq_num: this.lastCommittedState.seqNum,
+      cursor,
+      branch_num: this.branchNum,
+      metadata,
+    };
+    try {
+      await fetch(`${this.serverUrl}/documents/${this.docId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch {
+      // cursor-only updates are best-effort
+    }
+  }
+
+  // Called when the user edits content in the editor
+  setCurrentState(content: string, cursor: number) {
     return this._enqueue(() => {
       const oldDisplayed = this._computeDisplayed();
-      if (newText === oldDisplayed) return;
+      this.cursor = cursor;
 
-      const base = this._rebasedDispatched
-        ? applyPatch(this._rebasedDispatched, this.lastCommittedState.content)
-        : this.lastCommittedState.content;
-      this.queued = diffPatches(base, newText);
+      if (content !== oldDisplayed) {
+        const base = this._rebasedDispatched
+          ? applyPatch(this._rebasedDispatched, this.lastCommittedState.content)
+          : this.lastCommittedState.content;
+        this.queued = diffPatches(base, content);
+        if (!this.dispatched) this._maybePromoteAndSend();
+      }
 
-      if (!this.dispatched) this._maybePromoteAndSend();
       this._notify();
+    });
+  }
+
+  // Called when the cursor moves without a content change
+  setCursor(cursor: number) {
+    return this._enqueue(() => {
+      this.cursor = cursor;
+      if (this._cursorSendTimer !== null) clearTimeout(this._cursorSendTimer);
+      this._cursorSendTimer = setTimeout(() => {
+        this._cursorSendTimer = null;
+        if (!this.dispatched) void this._sendCursorOnly(this.cursor);
+      }, 500);
     });
   }
 

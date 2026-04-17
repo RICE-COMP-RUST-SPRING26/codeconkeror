@@ -28,8 +28,14 @@ export type DispatchedPatch = {
   externalPatchesSinceDispatch: Patch[];
 };
 
+export type ExternalCursor = {
+  pos: number;
+  metadata: Record<string, unknown>;
+};
+
 export type ClientObservableState = {
   displayedContent: string;
+  cursor: number;
   lastCommittedState: { seqNum: number; content: string };
   dispatched: DispatchedPatch | null;
   rebasedDispatched: Patch | null;
@@ -38,6 +44,7 @@ export type ClientObservableState = {
   clientId: string;
   connStatus: ClientStatus;
   initialized: boolean;
+  externalCursors: Map<string, ExternalCursor>;
 };
 
 export type EventLogEntry = {

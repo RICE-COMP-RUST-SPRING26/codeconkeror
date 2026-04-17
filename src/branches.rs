@@ -27,9 +27,10 @@ pub enum BranchEvent {
         )]
         patch: Option<Patch>,
         client_id: String,
-        // Some(Some(pos)) = cursor at pos, Some(None) = cursor removed, None = no cursor change
         #[serde(skip_serializing_if = "Option::is_none")]
-        cursor: Option<Option<DocumentPos>>,
+        cursor: Option<DocumentPos>,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        cursor_removed: bool,
         metadata: serde_json::Value,
     },
     #[serde(rename = "confirm_patch")]
@@ -191,7 +192,8 @@ impl Branch {
                     seqnum: new_seq,
                     patch: patch_prime.clone(),
                     client_id: originator_client_id.clone(),
-                    cursor: rebased_cursor.map(Some),
+                    cursor: rebased_cursor,
+                    cursor_removed: false,
                     metadata: metadata.clone(),
                 }
             };
@@ -215,7 +217,8 @@ impl Branch {
                         seqnum: None,
                         patch: None,
                         client_id: dead_id_str.clone(),
-                        cursor: Some(None), // explicit null = cursor removed
+                        cursor: None,
+                    cursor_removed: true,
                         metadata: serde_json::json!({}),
                     };
                     (conn.send)(event).is_ok()
