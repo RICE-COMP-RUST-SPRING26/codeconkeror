@@ -8,7 +8,7 @@
 //
 // Patch entry binary layout:
 //   timestamp:  8 bytes (u64 LE, millis since epoch)
-//   metadata:   JSON object (simplest is {}, decoding should go until a full json object is found)
+//   metadata:   JSON object (simplest is {}, decoding consumes until a full json object is found)
 //   patch:      remaining bytes, sequence of encoded OpComponents
 
 use crate::patch::{OpComponent, Patch};
@@ -87,11 +87,71 @@ impl Patch {
     }
 }
 
-// TODO: implement for PatchEntry
+#[derive(Debug, Clone)]
 pub struct PatchEntry {
-    patch: Patch,
-    timestamp: u64,
-    metadata: serde_json::Value,
+    pub patch: Patch,
+    pub timestamp: u64,
+    pub metadata: serde_json::Value,
+}
+
+impl PatchEntry {
+    pub fn new(patch: Patch, metadata: serde_json::Value) -> Self {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        Self {
+            patch,
+            timestamp,
+            metadata,
+        }
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&self.timestamp.to_le_bytes());
+
+        // Always serialize metadata as a JSON object. If the caller provided a
+        // non-object, we store {} instead.
+        let metadata_value = if self.metadata.is_object() {
+            &self.metadata
+        } else {
+            &serde_json::Value::Object(serde_json::Map::new())
+        };
+        let metadata_bytes =
+            serde_json::to_vec(metadata_value).expect("serializing a json value should not fail");
+        buf.extend_from_slice(&metadata_bytes);
+
+        buf.extend_from_slice(&self.patch.to_bytes());
+        buf
+    }
+
+    pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
+        if data.len() < 8 {
+            return Err("patch entry too short for timestamp".into());
+        }
+        let timestamp = u64::from_le_bytes(data[0..8].try_into().unwrap());
+
+        // Parse one JSON value starting at byte 8, then pick up where it ended.
+        let tail = &data[8..];
+        let mut stream = serde_json::Deserializer::from_slice(tail).into_iter::<serde_json::Value>();
+        let metadata = match stream.next() {
+            Some(Ok(v)) => v,
+            Some(Err(e)) => return Err(format!("invalid metadata json: {e}")),
+            None => return Err("missing metadata json".into()),
+        };
+        if !metadata.is_object() {
+            return Err("metadata must be a json object".into());
+        }
+        let consumed = stream.byte_offset();
+
+        let patch = Patch::from_bytes(&tail[consumed..])?;
+        Ok(PatchEntry {
+            patch,
+            timestamp,
+            metadata,
+        })
+    }
 }
 
 fn read_u32_le(data: &[u8], pos: &mut usize) -> Result<u32, String> {
@@ -105,24 +165,38 @@ fn read_u32_le(data: &[u8], pos: &mut usize) -> Result<u32, String> {
     Ok(u32::from_le_bytes(bytes))
 }
 
-fn read_u64_le(data: &[u8], pos: &mut usize) -> Result<u64, String> {
-    if *pos + 8 > data.len() {
-        return Err("unexpected end of data reading u64".into());
-    }
-    let bytes: [u8; 8] = data[*pos..*pos + 8]
-        .try_into()
-        .map_err(|_| "slice conversion failed")?;
-    *pos += 8;
-    Ok(u64::from_le_bytes(bytes))
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::patch::OpComponent::*;
 
-fn read_u128_le(data: &[u8], pos: &mut usize) -> Result<u128, String> {
-    if *pos + 16 > data.len() {
-        return Err("unexpected end of data reading u128".into());
+    #[test]
+    fn roundtrip_patch_entry() {
+        let patch = Patch::new(vec![Retain(3), Insert("hi".into()), Delete(1)]);
+        let meta = serde_json::json!({ "user": "alice", "n": 7 });
+        let entry = PatchEntry {
+            patch: patch.clone(),
+            timestamp: 123456789,
+            metadata: meta.clone(),
+        };
+        let bytes = entry.to_bytes();
+        let decoded = PatchEntry::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.timestamp, 123456789);
+        assert_eq!(decoded.metadata, meta);
+        assert_eq!(decoded.patch, patch);
     }
-    let bytes: [u8; 16] = data[*pos..*pos + 16]
-        .try_into()
-        .map_err(|_| "slice conversion failed")?;
-    *pos += 16;
-    Ok(u128::from_le_bytes(bytes))
+
+    #[test]
+    fn empty_metadata_defaults() {
+        let patch = Patch::new(vec![Retain(1)]);
+        let entry = PatchEntry {
+            patch: patch.clone(),
+            timestamp: 1,
+            metadata: serde_json::json!({}),
+        };
+        let bytes = entry.to_bytes();
+        let decoded = PatchEntry::from_bytes(&bytes).unwrap();
+        assert!(decoded.metadata.is_object());
+        assert_eq!(decoded.metadata.as_object().unwrap().len(), 0);
+    }
 }

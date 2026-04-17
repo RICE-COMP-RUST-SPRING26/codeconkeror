@@ -1,0 +1,301 @@
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex, RwLock};
+
+use serde::Serialize;
+
+use crate::encoding::PatchEntry;
+use crate::logtrees::{LogTree, LogtreeStorage};
+use crate::patch::Patch;
+use crate::replay;
+use crate::types::{Branch as BranchNum, ClientId, DocumentId, Version};
+
+const CACHE_CAPACITY: usize = 512;
+
+// ==================== Events ====================
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(tag = "type")]
+pub enum BranchEvent {
+    #[serde(rename = "external_patch")]
+    ExternalPatch {
+        seqnum: Version,
+        #[serde(with = "crate::serialize")]
+        patch: Patch,
+        client_id: String,
+        metadata: serde_json::Value,
+    },
+    #[serde(rename = "confirm_patch")]
+    ConfirmPatch {
+        seqnum: Version,
+        rebased: Vec<SerializedPatch>,
+    },
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct SerializedPatch {
+    #[serde(with = "crate::serialize")]
+    pub patch: Patch,
+}
+
+pub type SendFn =
+    Arc<dyn Fn(BranchEvent) -> Result<(), BroadcastError> + Send + Sync + 'static>;
+
+#[derive(Debug)]
+pub struct BroadcastError;
+
+pub struct Broadcaster {
+    pub client_id: ClientId,
+    pub send: SendFn,
+}
+
+// ==================== Branch ====================
+
+pub struct BranchState {
+    pub snapshot: String,
+    pub connections: Vec<Broadcaster>,
+    pub seq_num: Version,
+    pub cached_patches: VecDeque<(Version, Patch)>,
+}
+
+pub struct Branch {
+    pub tree: Arc<LogTree>,
+    pub branch_num: BranchNum,
+    pub state: Mutex<BranchState>,
+}
+
+pub struct PatchResult {
+    pub new_seq: Version,
+    pub rebased: Vec<Patch>,
+}
+
+impl Branch {
+    pub fn new(
+        tree: Arc<LogTree>,
+        branch_num: BranchNum,
+        seq_num: Version,
+        content: String,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            tree,
+            branch_num,
+            state: Mutex::new(BranchState {
+                snapshot: content,
+                connections: Vec::new(),
+                seq_num,
+                cached_patches: VecDeque::new(),
+            }),
+        })
+    }
+
+    pub fn add_connection(&self, broadcaster: Broadcaster) -> (Version, String) {
+        let mut st = self.state.lock().unwrap();
+        st.connections.push(broadcaster);
+        (st.seq_num, st.snapshot.clone())
+    }
+
+    pub fn patch(
+        &self,
+        client_id: ClientId,
+        prev_seq_num: Version,
+        patch: Patch,
+        metadata: serde_json::Value,
+    ) -> Result<PatchResult, String> {
+        let mut st = self.state.lock().unwrap();
+
+        if prev_seq_num > st.seq_num {
+            return Err(format!(
+                "prev_seq_num {prev_seq_num} is ahead of branch head {}",
+                st.seq_num
+            ));
+        }
+
+        // Collect committed patches in (prev_seq_num, state.seq_num]
+        let committed = collect_patches(&self.tree, self.branch_num, &st, prev_seq_num)?;
+
+        // OT the incoming patch against each committed patch.
+        let mut patch_prime = patch;
+        let mut rebased: Vec<Patch> = Vec::with_capacity(committed.len());
+        for committed_patch in committed.iter() {
+            let (committed_prime, new_patch_prime) = committed_patch.transform(&patch_prime)?;
+            rebased.push(committed_prime);
+            patch_prime = new_patch_prime;
+        }
+
+        // Apply to snapshot
+        let new_snapshot = patch_prime.apply(&st.snapshot)?;
+
+        // Append to the log tree
+        let entry = PatchEntry::new(patch_prime.clone(), metadata.clone());
+        let bytes = entry.to_bytes();
+        let _logged_seq = self
+            .tree
+            .append_to_branch(self.branch_num, &bytes)
+            .map_err(|e| format!("{e}"))?;
+
+        st.seq_num += 1;
+        let new_seq = st.seq_num;
+        st.snapshot = new_snapshot;
+
+        // Update cache
+        st.cached_patches.push_back((new_seq, patch_prime.clone()));
+        while st.cached_patches.len() > CACHE_CAPACITY {
+            st.cached_patches.pop_front();
+        }
+
+        // Broadcast
+        let originator_client_id = format!("{:032x}", client_id);
+        let rebased_serialized: Vec<SerializedPatch> =
+            rebased.iter().cloned().map(|p| SerializedPatch { patch: p }).collect();
+
+        st.connections.retain(|conn| {
+            let event = if conn.client_id == client_id {
+                BranchEvent::ConfirmPatch {
+                    seqnum: new_seq,
+                    rebased: rebased_serialized.clone(),
+                }
+            } else {
+                BranchEvent::ExternalPatch {
+                    seqnum: new_seq,
+                    patch: patch_prime.clone(),
+                    client_id: originator_client_id.clone(),
+                    metadata: metadata.clone(),
+                }
+            };
+            (conn.send)(event).is_ok()
+        });
+
+        Ok(PatchResult { new_seq, rebased })
+    }
+}
+
+fn collect_patches(
+    tree: &LogTree,
+    branch_num: BranchNum,
+    state: &BranchState,
+    after_seq: Version,
+) -> Result<Vec<Patch>, String> {
+    if after_seq >= state.seq_num {
+        return Ok(Vec::new());
+    }
+
+    // Check cache first
+    let need_from = after_seq + 1;
+    let need_to = state.seq_num;
+
+    if let Some((first_cached_seq, _)) = state.cached_patches.front() {
+        if *first_cached_seq <= need_from {
+            // Entire range is in cache
+            let mut out = Vec::new();
+            for (seq, patch) in state.cached_patches.iter() {
+                if *seq >= need_from && *seq <= need_to {
+                    out.push(patch.clone());
+                }
+            }
+            return Ok(out);
+        }
+    }
+
+    // Fall back to reading from disk
+    let payloads = tree
+        .read_range(branch_num, need_from, need_to)
+        .map_err(|e| format!("{e}"))?;
+    let mut out = Vec::with_capacity(payloads.len());
+    for bytes in payloads {
+        let entry = PatchEntry::from_bytes(&bytes)?;
+        out.push(entry.patch);
+    }
+    Ok(out)
+}
+
+// ==================== BranchManager ====================
+
+pub struct BranchManager {
+    branches: RwLock<HashMap<(DocumentId, BranchNum), Arc<Branch>>>,
+    storage: Mutex<LogtreeStorage>,
+}
+
+impl BranchManager {
+    pub fn new(storage: LogtreeStorage) -> Self {
+        Self {
+            branches: RwLock::new(HashMap::new()),
+            storage: Mutex::new(storage),
+        }
+    }
+
+    pub fn get_document_tree(&self, doc_id: DocumentId) -> Result<Arc<LogTree>, String> {
+        let mut storage = self.storage.lock().unwrap();
+        storage.get_logtree(doc_id)
+    }
+
+    pub fn open_branch(
+        &self,
+        doc_id: DocumentId,
+        branch_num: BranchNum,
+    ) -> Result<Arc<Branch>, String> {
+        {
+            let branches = self.branches.read().unwrap();
+            if let Some(b) = branches.get(&(doc_id, branch_num)) {
+                return Ok(b.clone());
+            }
+        }
+
+        let tree = self.get_document_tree(doc_id)?;
+        let head_seq = tree
+            .branch_head(branch_num)
+            .map_err(|e| format!("{e}"))?;
+        let content = replay::calculate_document_content(&tree, branch_num)?;
+
+        let mut branches = self.branches.write().unwrap();
+        if let Some(b) = branches.get(&(doc_id, branch_num)) {
+            return Ok(b.clone());
+        }
+        let branch = Branch::new(tree, branch_num, head_seq, content);
+        branches.insert((doc_id, branch_num), branch.clone());
+        Ok(branch)
+    }
+
+    pub fn create_document(
+        &self,
+        content: &str,
+        metadata: serde_json::Value,
+    ) -> Result<DocumentId, String> {
+        let tree = {
+            let mut storage = self.storage.lock().unwrap();
+            storage.create_logtree()?
+        };
+        let doc_id = tree.get_document_id();
+        let branch_num = tree.main_branch_num();
+
+        let initial_patch = Patch::diff("", content);
+        let entry = PatchEntry::new(initial_patch.clone(), metadata);
+        let bytes = entry.to_bytes();
+        let _seq = tree
+            .append_to_branch(branch_num, &bytes)
+            .map_err(|e| format!("{e}"))?;
+
+        let branch = Branch::new(tree, branch_num, 1, content.to_string());
+        let mut branches = self.branches.write().unwrap();
+        branches.insert((doc_id, branch_num), branch);
+        Ok(doc_id)
+    }
+
+    pub fn add_branch(
+        &self,
+        doc_id: DocumentId,
+        parent_branch: BranchNum,
+        parent_seq: Version,
+    ) -> Result<BranchNum, String> {
+        let tree = self.get_document_tree(doc_id)?;
+        tree.add_branch(parent_branch, parent_seq)
+            .map_err(|e| format!("{e}"))
+    }
+
+    /// If we have a cached `BranchState`, its `seq_num` is authoritative
+    /// (see ISSUES.md §1 re: logtree off-by-one). Otherwise return None so
+    /// the caller falls back to the on-disk head.
+    pub fn cached_head_seq(&self, doc_id: DocumentId, branch_num: BranchNum) -> Option<Version> {
+        let branches = self.branches.read().unwrap();
+        let b = branches.get(&(doc_id, branch_num))?;
+        Some(b.state.lock().unwrap().seq_num)
+    }
+}

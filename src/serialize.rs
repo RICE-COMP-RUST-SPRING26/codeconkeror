@@ -2,6 +2,15 @@ use crate::patch::{OpComponent, Patch};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+/// Module-style serde glue for `Patch`, usable as `#[serde(with = "crate::serialize")]`.
+pub fn serialize<S: Serializer>(patch: &Patch, serializer: S) -> Result<S::Ok, S::Error> {
+    serialize_patch(patch, serializer)
+}
+
+pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Patch, D::Error> {
+    deserialize_patch(deserializer)
+}
+
 pub fn serialize_patch<S: Serializer>(patch: &Patch, serializer: S) -> Result<S::Ok, S::Error> {
     use serde::ser::SerializeMap;
 
