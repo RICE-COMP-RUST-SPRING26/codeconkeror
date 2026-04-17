@@ -45,6 +45,7 @@ impl LogtreeStorage {
                 tree.get_document_id()
             ));
         }
+        log::info!("loaded logtree {:032x} from disk", doc_id);
         let arc = Arc::new(tree);
         self.logtrees.insert(doc_id, arc.clone());
         Ok(arc)
@@ -60,6 +61,7 @@ impl LogtreeStorage {
             .map_err(|e| format!("failed to open {}: {e}", path.display()))?;
         let tree = LogTree::create(storage, doc_id)
             .map_err(|e| format!("failed to create tree: {e}"))?;
+        log::info!("created logtree {:032x}", doc_id);
         let arc = Arc::new(tree);
         self.logtrees.insert(doc_id, arc.clone());
         Ok(arc)

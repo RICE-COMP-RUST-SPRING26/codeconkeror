@@ -161,6 +161,10 @@ impl Branch {
                     metadata: metadata.clone(),
                 }
             };
+            log::info!(
+                "broadcast to client {:032x}: {:?}",
+                conn.client_id, event
+            );
             (conn.send)(event).is_ok()
         });
 

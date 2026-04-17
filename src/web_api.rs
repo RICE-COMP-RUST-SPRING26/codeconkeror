@@ -89,6 +89,7 @@ async fn create_document(
         ));
     }
     let doc_id = state.create_document(&req.content, metadata)?;
+    log::info!("created document {:032x}", doc_id);
     Ok(Json(CreateDocResponse {
         doc_id: format!("{:032x}", doc_id),
     }))
@@ -177,6 +178,7 @@ async fn subscribe(
     };
 
     // Register and grab initial state atomically
+    log::info!("subscribe doc {:032x} branch {} client {:032x}", doc_id, branch_num, client_id);
     let (init_seq, init_content) = branch.add_connection(broadcaster);
 
     // Build SSE stream: first yield an Init event, then pipe BranchEvents.
@@ -241,6 +243,10 @@ async fn patch_document(
     }
 
     let branch = state.open_branch(doc_id, branch_num)?;
+    log::info!(
+        "patch doc {:032x} branch {} client {:032x} prev_seq {}",
+        doc_id, branch_num, client_id, req.prev_seq_num
+    );
     let result = branch
         .patch(client_id, req.prev_seq_num, req.patch, metadata)
         .map_err(ApiError::from)?;
