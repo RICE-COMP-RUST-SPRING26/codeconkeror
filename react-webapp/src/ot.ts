@@ -278,18 +278,46 @@ export function buildDebugSegments(
 export type DiffSegment = { text: string; type: 'same' | 'added' | 'removed' };
 
 export function buildDiffSegments(base: string, target: string): DiffSegment[] {
-  const patch = diffPatches(base, target);
+  const baseLines = base.split('\n');
+  const targetLines = target.split('\n');
+  const n = baseLines.length;
+  const m = targetLines.length;
+  const stride = m + 1;
+  const dp = new Int32Array((n + 1) * stride);
+  for (let i = 1; i <= n; i++) {
+    for (let j = 1; j <= m; j++) {
+      if (baseLines[i - 1] === targetLines[j - 1]) {
+        dp[i * stride + j] = dp[(i - 1) * stride + (j - 1)] + 1;
+      } else {
+        const up = dp[(i - 1) * stride + j];
+        const left = dp[i * stride + (j - 1)];
+        dp[i * stride + j] = up > left ? up : left;
+      }
+    }
+  }
+
+  type LineOp = { type: 'same' | 'added' | 'removed'; line: string };
+  const lineOps: LineOp[] = [];
+  let i = n, j = m;
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && baseLines[i - 1] === targetLines[j - 1]) {
+      lineOps.push({ type: 'same', line: baseLines[i - 1] }); i--; j--;
+    } else if (j > 0 && (i === 0 || dp[i * stride + (j - 1)] >= dp[(i - 1) * stride + j])) {
+      lineOps.push({ type: 'added', line: targetLines[j - 1] }); j--;
+    } else {
+      lineOps.push({ type: 'removed', line: baseLines[i - 1] }); i--;
+    }
+  }
+  lineOps.reverse();
+
   const segments: DiffSegment[] = [];
-  let pos = 0;
-  for (const op of patch.ops) {
-    if ('retain' in op) {
-      segments.push({ text: base.slice(pos, pos + op.retain), type: 'same' });
-      pos += op.retain;
-    } else if ('insert' in op) {
-      segments.push({ text: op.insert, type: 'added' });
-    } else if ('delete' in op) {
-      segments.push({ text: base.slice(pos, pos + op.delete), type: 'removed' });
-      pos += op.delete;
+  for (let k = 0; k < lineOps.length; k++) {
+    const { type, line } = lineOps[k];
+    const text = k < lineOps.length - 1 ? line + '\n' : line;
+    if (segments.length > 0 && segments[segments.length - 1].type === type) {
+      segments[segments.length - 1].text += text;
+    } else {
+      segments.push({ text, type });
     }
   }
   return segments;
