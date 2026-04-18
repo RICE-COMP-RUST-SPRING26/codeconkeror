@@ -282,7 +282,7 @@ POST documents/DOCID/branches { parent_branch (optional, defaults to 0), parent_
 // 2. Return the new branch number
 ```
 
-# Webapp
+# Client Synchronization Strategy
 The webapp has a Client ID which it randomly generates, and stores in session storage.
 The webapp should have a hard-coded constant for the server url, you should not have the server url be a textbox.
 Also the info currently displayed below the textbox should be moved above (except the history)
@@ -330,35 +330,3 @@ class ClientDocumentManager {
     onExternalCursorUpdate(clientId, metadata, position (nullable))
 }
 ```
-
-Features that should be added:
-You should be able to set a name. then all patches will have a "name" field in the metadata.
-For external cursors, it should show the name above the cursor.
-You should modify it to use CodeMirror for the code.
-# Code Editor
-
-Please create a code editor component, which can also show a diff next to it.
-It should use CodeMirror.
-The diff should be what has changed when going from code -> diffCode.
-For example, if a line in the code is removed or different in the diffCode, then aligned with the corresponding line in the code (left pane), there should be a red highlighted line in the diff (right pane)
-If a line in the diff code is added or different from the original code, then it should display that line highlighted in the diff (right pane), but there should be an empty line at the same height in the code (left pane).
-For lines that are the same, it should display the line aligned both in the left and right panes.
-The line numbers should correspond to lines that actually exist in the corresponding code (code in left pane and diffCode in right pane). So for example, all red lines in the diff should not contain a line number, and the blank lines on the left which are aligned with green lines on the right should not contain line numbers in the left side.
-The two CodeMirror components should be side by side, and should not scroll individually. Instead, they should be in an unbounded div, which is position absolute, and the outer div scrolls, so that the two scroll together with one scrollbar.
-This is for concurrent editting software, so it should also display the cursors with the names.
-```typescript
-type Cursor = {
-    label: string,
-    pos: number,
-}
-
-type CodeEditorWithDiffProps = {
-    code: string,
-    cursors: Cursor[],
-    onChange: (s: string, newCursorPos: number | null) => void,
-    onCursorMove: (newCursorPos: number | null) => void,
-    diff: { code: string, cursors: Cursor[] } | null,
-}
-```
-After this is done, please create a storybook component with two stories, one containing diff, and one not.
-
