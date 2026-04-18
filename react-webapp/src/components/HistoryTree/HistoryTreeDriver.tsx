@@ -113,7 +113,9 @@ export default function HistoryTreeDriver({
 
     useEffect(() => {
         for (const branch of branches) {
-            void loadBranch(branch.branch_num, branch.head_seq, branch.parent_seq ?? null);
+            if (!branchDataRef.current.has(branch.branch_num)) {
+                void loadBranch(branch.branch_num, branch.head_seq, branch.parent_seq ?? null);
+            }
         }
     }, [branches, loadBranch]);
 
@@ -217,8 +219,11 @@ export default function HistoryTreeDriver({
         [onForkHere],
     );
 
-    const centerAtNode =
-        currentSeqNum >= 1 ? { branch: currentBranchNum, seq: currentSeqNum } : null;
+    const centerAtNodeRef = useRef<{ branch: number; seq: number } | null>(null);
+    if (currentSeqNum >= 1) {
+        centerAtNodeRef.current = { branch: currentBranchNum, seq: currentSeqNum };
+    }
+    const centerAtNode = centerAtNodeRef.current;
 
     return (
         <div style={{ width: "100%", height: "100%" }}>

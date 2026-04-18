@@ -23,7 +23,7 @@ import "@xyflow/react/dist/style.css";
 // --- Global Layout Constants ---
 export const VERTICAL_SPACING = 45;
 export const HORIZONTAL_SPACING = 160;
-export const EXTRA_GAP_BEFORE_LOADED = 40; // <-- New global variable for the load button gap
+export const EXTRA_GAP_BEFORE_LOADED = 40;
 
 export type VersionNode<T> = {
     seq: number;
@@ -64,7 +64,6 @@ const GapEdge = ({
         ? getStraightPath({ sourceX, sourceY, targetX, targetY })
         : getSmoothStepPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition });
 
-    // Position the label directly above the target node (the first loaded node)
     const labelX = targetX;
     const labelY = targetY - 12;
 
@@ -123,18 +122,17 @@ const CompactHandle = ({
     type: "source" | "target";
     position: Position;
     id: string;
-    color: string;
+    color?: string;
 }) => (
     <Handle
         type={type}
         position={position}
         id={id}
+        isConnectable={false}
         style={{
-            background: color,
-            width: "6px",
-            height: "6px",
-            minWidth: "auto",
-            minHeight: "auto",
+            opacity: 0,
+            width: "1px",
+            height: "1px",
         }}
     />
 );
@@ -143,26 +141,15 @@ const CommitNode = memo(
     ({ data }: NodeProps) => {
         return (
             <div style={{ ...NODE_STYLE, background: "#fff", border: "1px solid #333" }}>
-                <CompactHandle type="target" position={Position.Top} id="top" color="#555" />
+                <CompactHandle type="target" position={Position.Top} id="top" />
                 {/* @ts-ignore */}
                 {data.renderNode(data.nodeData)}
-                {/* @ts-ignore */}
-                {data.headNode && (
-                    <div
-                        className="nodrag nopan"
-                        style={{ marginTop: "4px", borderTop: "1px solid #eee", paddingTop: "4px" }}
-                    >
-                        {data.headNode as React.ReactNode}
-                    </div>
-                )}
-                <CompactHandle type="source" position={Position.Bottom} id="bottom" color="#555" />
-                <CompactHandle type="source" position={Position.Right} id="right" color="#007bff" />
+                <CompactHandle type="source" position={Position.Bottom} id="bottom" />
+                <CompactHandle type="source" position={Position.Right} id="right" />
             </div>
         );
     },
     (prevProps, nextProps) => {
-        // Only re-render if it's actually a different node sequence.
-        // This stops the 100+ untouched nodes from re-rendering when 1 is added!
         // @ts-ignore
         return prevProps.data.nodeData?.seq === nextProps.data.nodeData?.seq;
     },
@@ -180,21 +167,11 @@ const DummyNode = memo(
                     textAlign: "center",
                 }}
             >
-                <CompactHandle type="target" position={Position.Top} id="top" color="transparent" />
+                <CompactHandle type="target" position={Position.Top} id="top" />
                 <div style={{ fontSize: "10px", fontWeight: "bold" }}>Not Loaded</div>
                 <div style={{ fontSize: "9px" }}>Seq: {data.seq as number}</div>
-                <CompactHandle
-                    type="source"
-                    position={Position.Bottom}
-                    id="bottom"
-                    color="transparent"
-                />
-                <CompactHandle
-                    type="source"
-                    position={Position.Right}
-                    id="right"
-                    color="transparent"
-                />
+                <CompactHandle type="source" position={Position.Bottom} id="bottom" />
+                <CompactHandle type="source" position={Position.Right} id="right" />
             </div>
         );
     },
@@ -206,9 +183,20 @@ const DummyNode = memo(
     },
 );
 
+// Completely isolated Head Node: No handles, border removed
+const HeadNodeComponent = memo(({ data }: NodeProps) => {
+    return (
+        <div style={{ ...NODE_STYLE, background: "transparent" }}>
+            {/* @ts-ignore */}
+            {data.headNode as React.ReactNode}
+        </div>
+    );
+});
+
 const nodeTypes = {
     commit: CommitNode,
     dummy: DummyNode,
+    head: HeadNodeComponent,
 };
 
 const edgeTypes = {
@@ -225,8 +213,8 @@ function HistoryTreeInner<T>({
 }: HistoryTreeProps<T>) {
     const { setCenter } = useReactFlow();
     const [loadingBranches, setLoadingBranches] = useState<Set<number>>(new Set());
-    // Auto-recenter state initialized to true
     const [autoRecenter, setAutoRecenter] = useState(true);
+    const [hideInnerNodes, setHideInnerNodes] = useState(false);
 
     useEffect(() => {
         setLoadingBranches(new Set());
@@ -275,7 +263,7 @@ function HistoryTreeInner<T>({
             xMap.set(id, index * HORIZONTAL_SPACING);
         });
 
-        // 2. Identify all sequences that exist within each branch (loaded + dummy)
+        // 2. Identify all sequences that exist within each branch
         const branchSeqs = new Map<number, Set<number>>();
         branchEntries.forEach(([id, branch]) => {
             if (!branchSeqs.has(id)) branchSeqs.set(id, new Set());
@@ -293,7 +281,15 @@ function HistoryTreeInner<T>({
             }
         });
 
-        // 3. Calculate Independent Y-coordinates per branch using strictly uniform spacing
+        // 2.5 Identify Nodes which a branch comes out from (Branch Parents)
+        const branchParents = new Set<string>();
+        branchEntries.forEach(([id, branch]) => {
+            if (branch.parent) {
+                branchParents.add(`${branch.parent.branch}_${branch.parent.seq}`);
+            }
+        });
+
+        // 3. Calculate Independent Y-coordinates per branch
         const computedYMap = new Map<string, number>();
 
         orderedBranchIds.forEach((branchId) => {
@@ -301,31 +297,34 @@ function HistoryTreeInner<T>({
             const seqs = Array.from(branchSeqs.get(branchId) || []).sort((a, b) => a - b);
             if (seqs.length === 0) return;
 
-            // Identify the first loaded sequence so we can inject our extra vertical gap
+            const loadedSeqs = new Set(branch.nodes.map((n) => n.seq));
+            const headSeq =
+                branch.nodes.length > 0 ? Math.max(...branch.nodes.map((n) => n.seq)) : null;
+
+            // Filter out inner nodes if hideInnerNodes is checked, compacting the layout
+            const visibleSeqs = seqs.filter((seq) => {
+                if (!hideInnerNodes) return true;
+                const isDummy = !loadedSeqs.has(seq);
+                const isRoot = !branch.parent && seq === 1;
+                const isHead = seq === headSeq;
+                const isBranchParent = branchParents.has(`${branchId}_${seq}`);
+                return isDummy || isRoot || isHead || isBranchParent;
+            });
+
             const firstLoadedSeq =
                 branch.nodes.length > 0 ? Math.min(...branch.nodes.map((n) => n.seq)) : null;
 
             let currentY = 0;
 
             if (branch.parent) {
-                // Anchor this branch relative to its parent's exact Y-coordinate,
-                // stepping down by exactly 1 standard block.
                 const parentY =
                     computedYMap.get(`${branch.parent.branch}_${branch.parent.seq}`) || 0;
                 currentY = parentY + VERTICAL_SPACING;
             }
 
-            seqs.forEach((seq, index) => {
-                if (index > 0) {
-                    // Uniformly step down for every node in the local branch sequence
-                    currentY += VERTICAL_SPACING;
-                }
-
-                // Add an extra vertical buffer before the first loaded node to clear the button
-                if (seq === firstLoadedSeq) {
-                    currentY += EXTRA_GAP_BEFORE_LOADED;
-                }
-
+            visibleSeqs.forEach((seq, index) => {
+                if (index > 0) currentY += VERTICAL_SPACING;
+                if (seq === firstLoadedSeq) currentY += EXTRA_GAP_BEFORE_LOADED;
                 computedYMap.set(`${branchId}_${seq}`, currentY);
             });
         });
@@ -343,10 +342,20 @@ function HistoryTreeInner<T>({
                     ? Math.max(...branch.nodes.map((n) => n.seq))
                     : null;
 
-            seqs.forEach((seq) => {
+            const visibleSeqs = Array.from(seqs)
+                .sort((a, b) => a - b)
+                .filter((seq) => {
+                    if (!hideInnerNodes) return true;
+                    const isDummy = !loadedNodesMap.has(seq);
+                    const isRoot = !branch?.parent && seq === 1;
+                    const isHead = seq === headSeq;
+                    const isBranchParent = branchParents.has(`${branchId}_${seq}`);
+                    return isDummy || isRoot || isHead || isBranchParent;
+                });
+
+            visibleSeqs.forEach((seq) => {
                 const y = computedYMap.get(`${branchId}_${seq}`)!;
                 if (loadedNodesMap.has(seq)) {
-                    const isHead = seq === headSeq;
                     nodes.push({
                         id: `commit_${branchId}_${seq}`,
                         type: "commit",
@@ -354,7 +363,6 @@ function HistoryTreeInner<T>({
                         data: {
                             nodeData: loadedNodesMap.get(seq),
                             renderNode,
-                            ...(isHead && branch?.headNode ? { headNode: branch.headNode } : {}),
                         },
                     });
                 } else {
@@ -367,6 +375,17 @@ function HistoryTreeInner<T>({
                     });
                 }
             });
+
+            // 4.1 Append Separate Head Node closely below the last actual node
+            if (branch?.headNode && headSeq !== null) {
+                const headY = computedYMap.get(`${branchId}_${headSeq}`)! + 28;
+                nodes.push({
+                    id: `head_${branchId}`,
+                    type: "head",
+                    position: { x: branchX, y: headY },
+                    data: { headNode: branch.headNode },
+                });
+            }
         });
 
         // 5. Build Flow Edges
@@ -376,12 +395,24 @@ function HistoryTreeInner<T>({
             const firstNode = sortedNodes[0];
             if (!firstNode) return;
 
-            if (!branch.parent && firstNode.seq > 1) {
+            const headSeq = sortedNodes[sortedNodes.length - 1].seq;
+            const visibleNodes = sortedNodes.filter((node) => {
+                if (!hideInnerNodes) return true;
+                const isRoot = !branch.parent && node.seq === 1;
+                const isHead = node.seq === headSeq;
+                const isBranchParent = branchParents.has(`${branchId}_${node.seq}`);
+                return isRoot || isHead || isBranchParent;
+            });
+
+            const firstVisibleNode = visibleNodes[0];
+            if (!firstVisibleNode) return;
+
+            if (!branch.parent && firstVisibleNode.seq > 1) {
                 edges.push({
                     id: `edge_gap_root_${branchId}`,
                     source: `dummy_${branchId}_1`,
                     sourceHandle: "bottom",
-                    target: `commit_${branchId}_${firstNode.seq}`,
+                    target: `commit_${branchId}_${firstVisibleNode.seq}`,
                     targetHandle: "top",
                     type: "gapEdge",
                     style: { strokeWidth: 2, stroke: "#adb5bd", strokeDasharray: "4 4" },
@@ -396,9 +427,9 @@ function HistoryTreeInner<T>({
                 });
             }
 
-            sortedNodes.forEach((node, idx) => {
+            visibleNodes.forEach((node, idx) => {
                 if (idx > 0) {
-                    const prevNode = sortedNodes[idx - 1];
+                    const prevNode = visibleNodes[idx - 1];
                     edges.push({
                         id: `edge_${branchId}_${prevNode.seq}_to_${node.seq}`,
                         source: `commit_${branchId}_${prevNode.seq}`,
@@ -426,7 +457,7 @@ function HistoryTreeInner<T>({
                     id: `edge_parent_to_${branchId}`,
                     source: actualParentId,
                     sourceHandle: "right",
-                    target: `commit_${branchId}_${firstNode.seq}`,
+                    target: `commit_${branchId}_${firstVisibleNode.seq}`,
                     targetHandle: "top",
                     type: isFullyLoaded ? "smoothstep" : "gapEdge",
                     style: {
@@ -452,9 +483,35 @@ function HistoryTreeInner<T>({
         });
 
         return { flowNodes: nodes, flowEdges: edges, branchXMap: xMap, nodeYMap: computedYMap };
-    }, [branches, renderNode, loadingBranches, onRequestMoreHistory]);
+    }, [branches, renderNode, loadingBranches, onRequestMoreHistory, hideInnerNodes]);
 
-    // Updated useEffect for recentering based on the autoRecenter state
+    // Calculate boundaries to prevent panning away from nodes
+    const translateExtent = useMemo(() => {
+        if (flowNodes.length === 0) return undefined;
+
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+
+        flowNodes.forEach((node) => {
+            if (node.position.x < minX) minX = node.position.x;
+            if (node.position.y < minY) minY = node.position.y;
+            if (node.position.x > maxX) maxX = node.position.x;
+            if (node.position.y > maxY) maxY = node.position.y;
+        });
+
+        // Add some padding (e.g., 600px) so they can still center edge nodes comfortably
+        const padding = 600;
+        const nodeWidthEstimate = 130;
+        const nodeHeightEstimate = 50;
+
+        return [
+            [minX - padding, minY - padding],
+            [maxX + nodeWidthEstimate + padding, maxY + nodeHeightEstimate + padding],
+        ] as [[number, number], [number, number]];
+    }, [flowNodes]);
+
     useEffect(() => {
         if (autoRecenter && centerAtNode) {
             const x = branchXMap.get(centerAtNode.branch);
@@ -486,7 +543,9 @@ function HistoryTreeInner<T>({
             nodeTypes={nodeTypes}
             edgeTypes={edgeTypes}
             fitView={!centerAtNode}
-            panOnScroll={true} // Enables standard scroll for panning and Ctrl+Scroll for zoom
+            panOnScroll={true}
+            minZoom={0.05}
+            translateExtent={translateExtent}
         >
             <Background />
             <Controls />
@@ -506,15 +565,13 @@ function HistoryTreeInner<T>({
                 }}
             >
                 <strong style={{ fontSize: "0.85em", marginBottom: "2px" }}>Focus Branch</strong>
-
-                {/* Auto Recenter Checkbox */}
                 <label
                     style={{
                         display: "flex",
                         alignItems: "center",
                         gap: "6px",
                         fontSize: "0.8em",
-                        marginBottom: "4px",
+                        marginBottom: "2px",
                         cursor: "pointer",
                     }}
                 >
@@ -524,6 +581,23 @@ function HistoryTreeInner<T>({
                         onChange={(e) => setAutoRecenter(e.target.checked)}
                     />
                     Auto Recenter
+                </label>
+                <label
+                    style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "6px",
+                        fontSize: "0.8em",
+                        marginBottom: "8px",
+                        cursor: "pointer",
+                    }}
+                >
+                    <input
+                        type="checkbox"
+                        checked={hideInnerNodes}
+                        onChange={(e) => setHideInnerNodes(e.target.checked)}
+                    />
+                    Hide Inner Nodes
                 </label>
 
                 {Array.from(branches.entries())
