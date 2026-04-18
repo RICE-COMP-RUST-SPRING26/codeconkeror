@@ -14,6 +14,7 @@ export type BranchSummary = {
 
 export type NodeSummary = {
   seq: number;
+  branch_num: number;
   patch: Patch;
   timestamp: number;
   metadata: Record<string, unknown>;

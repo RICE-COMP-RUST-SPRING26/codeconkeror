@@ -408,6 +408,7 @@ function BaseEditor({
     const containerRef = useRef<HTMLDivElement>(null);
     const viewRef = useRef<EditorView | null>(null);
     const isExternalChange = useRef(false);
+    const lastExternalCode = useRef<string | null>(null);
 
     const cbRef = useRef({ onChange, onCursorMove });
     useEffect(() => {
@@ -424,12 +425,11 @@ function BaseEditor({
             inlineButtonsField,
             EditorView.updateListener.of((update) => {
                 if (isExternalChange.current) return;
-                if (update.docChanged)
-                    cbRef.current.onChange?.(
-                        update.state.doc.toString(),
-                        update.state.selection.main.head,
-                    );
-                else if (update.selectionSet)
+                if (update.docChanged) {
+                    const newCode = update.state.doc.toString();
+                    lastExternalCode.current = newCode;
+                    cbRef.current.onChange?.(newCode, update.state.selection.main.head);
+                } else if (update.selectionSet)
                     cbRef.current.onCursorMove?.(update.state.selection.main.head);
             }),
             EditorView.theme({
@@ -446,6 +446,7 @@ function BaseEditor({
             parent: containerRef.current,
         });
         viewRef.current = view;
+        lastExternalCode.current = code;
         return () => view.destroy();
     }, [readOnly]);
 
@@ -454,8 +455,10 @@ function BaseEditor({
         if (!view) return;
         isExternalChange.current = true;
         try {
-            if (view.state.doc.toString() !== code)
+            if (lastExternalCode.current !== code) {
+                lastExternalCode.current = code;
                 view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: code } });
+            }
             view.dispatch({
                 effects: [
                     setCursorsEffect.of(cursors ?? []),

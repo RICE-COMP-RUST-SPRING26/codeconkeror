@@ -6,6 +6,7 @@ import BranchControls from "./components/BranchControls";
 import StatusBar from "./components/StatusBar";
 import DebugPanel from "./components/DebugPanel";
 import HistoryPanel from "./components/HistoryPanel";
+import HistoryTreeDriver from "./components/HistoryTree/HistoryTreeDriver";
 import EventLogPanel from "./components/EventLogPanel";
 import { CodeEditorWithDiff } from "./components/CodeEditorWithDiff/CodeEditorWithDiff";
 import type { Cursor } from "./components/CodeEditorWithDiff/CodeEditorWithDiff";
@@ -21,7 +22,7 @@ const LOREM_IPSUM =
     "Ut enim ad minim veniam, quis nostrud " +
     "exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.\n";
 
-type RightPanel = "debug" | "eventlog" | "history" | null;
+type RightPanel = "debug" | "eventlog" | "history" | "tree" | null;
 
 export default function App() {
     const [clientId] = useState(() => {
@@ -173,7 +174,7 @@ export default function App() {
             const end = mainState.lastCommittedState.seqNum;
             if (end >= 1) {
                 const data = await manager.fetchNodes(1, end, mainState.branchNum);
-                setHistoryNodes(data.nodes);
+                setHistoryNodes(data.nodes.map((n) => ({ ...n, branch_num: mainState.branchNum })));
             } else {
                 setHistoryNodes([]);
             }
@@ -189,7 +190,7 @@ export default function App() {
         const manager = managerRef.current;
         if (!manager || !docId || !mainState) return;
         try {
-            const res = await manager.createBranch(node.seq, mainState.branchNum);
+            const res = await manager.createBranch(node.seq, node.branch_num);
             await refreshBranches();
             openDocument(docId, res.branch_num);
         } catch (e) {
@@ -285,6 +286,16 @@ export default function App() {
                 onSwitchBranch={(n) => {
                     if (docId) openDocument(docId, n);
                 }}
+            />
+        );
+    } else if (rightPanel === "tree") {
+        rightComponent = (
+            <HistoryTreeDriver
+                manager={managerRef.current}
+                currentBranchNum={currentBranchNum}
+                currentSeqNum={mainState?.lastCommittedState.seqNum ?? 0}
+                branches={branches}
+                onForkHere={(node) => void forkFromNode(node)}
             />
         );
     }
@@ -399,6 +410,20 @@ export default function App() {
                             }`}
                         >
                             {historyLoading ? "Loading…" : "History"}
+                        </button>
+                        <button
+                            onClick={() => {
+                                togglePanel("tree");
+                                void refreshBranches();
+                            }}
+                            disabled={!docId}
+                            className={`px-3 py-1 rounded text-sm border disabled:opacity-40 ${
+                                rightPanel === "tree"
+                                    ? "bg-blue-100 border-blue-300 text-blue-700"
+                                    : "bg-gray-100 hover:bg-gray-200 border-gray-300"
+                            }`}
+                        >
+                            Tree
                         </button>
                         <select
                             value={shadowBranchNum !== null ? String(shadowBranchNum) : ""}

@@ -282,9 +282,14 @@ export class DocumentClient {
     return res.json();
   }
 
-  async createBranch(parentSeq: number, parentBranch: number | null = null): Promise<{ branch_num: number }> {
+  async createBranch(
+    parentSeq: number,
+    parentBranch: number | null = null,
+    metadata?: Record<string, unknown>,
+  ): Promise<{ branch_num: number; seq: number }> {
     const body: Record<string, unknown> = { parent_seq: parentSeq };
     if (parentBranch != null) body.parent_branch = parentBranch;
+    if (metadata) body.metadata = metadata;
     const res = await fetch(`${this.serverUrl}/documents/${this.docId}/branches`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
