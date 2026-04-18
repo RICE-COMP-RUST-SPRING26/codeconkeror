@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback, memo } from "react";
 import {
     ReactFlow,
     ReactFlowProvider,
@@ -23,6 +23,7 @@ import "@xyflow/react/dist/style.css";
 // --- Global Layout Constants ---
 export const VERTICAL_SPACING = 45;
 export const HORIZONTAL_SPACING = 160;
+export const EXTRA_GAP_BEFORE_LOADED = 40; // <-- New global variable for the load button gap
 
 export type VersionNode<T> = {
     seq: number;
@@ -37,6 +38,7 @@ export type HistoryTreeProps<T> = {
         {
             nodes: VersionNode<T>[];
             parent: { branch: number; seq: number } | null;
+            headNode?: React.ReactNode;
         }
     >;
     renderNode: (node: VersionNode<T>) => React.ReactNode;
@@ -137,42 +139,72 @@ const CompactHandle = ({
     />
 );
 
-const CommitNode = ({ data }: NodeProps) => {
-    return (
-        <div style={{ ...NODE_STYLE, background: "#fff", border: "1px solid #333" }}>
-            <CompactHandle type="target" position={Position.Top} id="top" color="#555" />
-            {/* @ts-ignore */}
-            {data.renderNode(data.nodeData)}
-            <CompactHandle type="source" position={Position.Bottom} id="bottom" color="#555" />
-            <CompactHandle type="source" position={Position.Right} id="right" color="#007bff" />
-        </div>
-    );
-};
+const CommitNode = memo(
+    ({ data }: NodeProps) => {
+        return (
+            <div style={{ ...NODE_STYLE, background: "#fff", border: "1px solid #333" }}>
+                <CompactHandle type="target" position={Position.Top} id="top" color="#555" />
+                {/* @ts-ignore */}
+                {data.renderNode(data.nodeData)}
+                {/* @ts-ignore */}
+                {data.headNode && (
+                    <div
+                        className="nodrag nopan"
+                        style={{ marginTop: "4px", borderTop: "1px solid #eee", paddingTop: "4px" }}
+                    >
+                        {data.headNode as React.ReactNode}
+                    </div>
+                )}
+                <CompactHandle type="source" position={Position.Bottom} id="bottom" color="#555" />
+                <CompactHandle type="source" position={Position.Right} id="right" color="#007bff" />
+            </div>
+        );
+    },
+    (prevProps, nextProps) => {
+        // Only re-render if it's actually a different node sequence.
+        // This stops the 100+ untouched nodes from re-rendering when 1 is added!
+        // @ts-ignore
+        return prevProps.data.nodeData?.seq === nextProps.data.nodeData?.seq;
+    },
+);
 
-const DummyNode = ({ data }: NodeProps) => {
-    return (
-        <div
-            style={{
-                ...NODE_STYLE,
-                background: "#f8f9fa",
-                border: "1px dashed #adb5bd",
-                color: "#6c757d",
-                textAlign: "center",
-            }}
-        >
-            <CompactHandle type="target" position={Position.Top} id="top" color="transparent" />
-            <div style={{ fontSize: "10px", fontWeight: "bold" }}>Not Loaded</div>
-            <div style={{ fontSize: "9px" }}>Seq: {data.seq as number}</div>
-            <CompactHandle
-                type="source"
-                position={Position.Bottom}
-                id="bottom"
-                color="transparent"
-            />
-            <CompactHandle type="source" position={Position.Right} id="right" color="transparent" />
-        </div>
-    );
-};
+const DummyNode = memo(
+    ({ data }: NodeProps) => {
+        return (
+            <div
+                style={{
+                    ...NODE_STYLE,
+                    background: "#f8f9fa",
+                    border: "1px dashed #adb5bd",
+                    color: "#6c757d",
+                    textAlign: "center",
+                }}
+            >
+                <CompactHandle type="target" position={Position.Top} id="top" color="transparent" />
+                <div style={{ fontSize: "10px", fontWeight: "bold" }}>Not Loaded</div>
+                <div style={{ fontSize: "9px" }}>Seq: {data.seq as number}</div>
+                <CompactHandle
+                    type="source"
+                    position={Position.Bottom}
+                    id="bottom"
+                    color="transparent"
+                />
+                <CompactHandle
+                    type="source"
+                    position={Position.Right}
+                    id="right"
+                    color="transparent"
+                />
+            </div>
+        );
+    },
+    (prevProps, nextProps) => {
+        return (
+            prevProps.data.seq === nextProps.data.seq &&
+            prevProps.data.isRoot === nextProps.data.isRoot
+        );
+    },
+);
 
 const nodeTypes = {
     commit: CommitNode,
@@ -193,8 +225,8 @@ function HistoryTreeInner<T>({
 }: HistoryTreeProps<T>) {
     const { setCenter } = useReactFlow();
     const [loadingBranches, setLoadingBranches] = useState<Set<number>>(new Set());
-
-    console.log(centerAtNode);
+    // Auto-recenter state initialized to true
+    const [autoRecenter, setAutoRecenter] = useState(true);
 
     useEffect(() => {
         setLoadingBranches(new Set());
@@ -269,6 +301,10 @@ function HistoryTreeInner<T>({
             const seqs = Array.from(branchSeqs.get(branchId) || []).sort((a, b) => a - b);
             if (seqs.length === 0) return;
 
+            // Identify the first loaded sequence so we can inject our extra vertical gap
+            const firstLoadedSeq =
+                branch.nodes.length > 0 ? Math.min(...branch.nodes.map((n) => n.seq)) : null;
+
             let currentY = 0;
 
             if (branch.parent) {
@@ -284,6 +320,12 @@ function HistoryTreeInner<T>({
                     // Uniformly step down for every node in the local branch sequence
                     currentY += VERTICAL_SPACING;
                 }
+
+                // Add an extra vertical buffer before the first loaded node to clear the button
+                if (seq === firstLoadedSeq) {
+                    currentY += EXTRA_GAP_BEFORE_LOADED;
+                }
+
                 computedYMap.set(`${branchId}_${seq}`, currentY);
             });
         });
@@ -296,14 +338,24 @@ function HistoryTreeInner<T>({
             const loadedNodesMap = new Map();
             branch?.nodes.forEach((n) => loadedNodesMap.set(n.seq, n));
 
+            const headSeq =
+                branch && branch.nodes.length > 0
+                    ? Math.max(...branch.nodes.map((n) => n.seq))
+                    : null;
+
             seqs.forEach((seq) => {
                 const y = computedYMap.get(`${branchId}_${seq}`)!;
                 if (loadedNodesMap.has(seq)) {
+                    const isHead = seq === headSeq;
                     nodes.push({
                         id: `commit_${branchId}_${seq}`,
                         type: "commit",
                         position: { x: branchX, y },
-                        data: { nodeData: loadedNodesMap.get(seq), renderNode },
+                        data: {
+                            nodeData: loadedNodesMap.get(seq),
+                            renderNode,
+                            ...(isHead && branch?.headNode ? { headNode: branch.headNode } : {}),
+                        },
                     });
                 } else {
                     const isRoot = !branch?.parent && seq === 1;
@@ -402,15 +454,16 @@ function HistoryTreeInner<T>({
         return { flowNodes: nodes, flowEdges: edges, branchXMap: xMap, nodeYMap: computedYMap };
     }, [branches, renderNode, loadingBranches, onRequestMoreHistory]);
 
+    // Updated useEffect for recentering based on the autoRecenter state
     useEffect(() => {
-        if (centerAtNode) {
+        if (autoRecenter && centerAtNode) {
             const x = branchXMap.get(centerAtNode.branch);
             const y = nodeYMap.get(`${centerAtNode.branch}_${centerAtNode.seq}`);
             if (x !== undefined && y !== undefined) {
                 setCenter(x + 65, y + 30, { zoom: 1, duration: 800 });
             }
         }
-    }, [centerAtNode?.branch, centerAtNode?.seq]);
+    }, [autoRecenter, centerAtNode?.branch, centerAtNode?.seq, setCenter]);
 
     const focusBranch = useCallback(
         (branchId: number) => {
@@ -433,6 +486,7 @@ function HistoryTreeInner<T>({
             nodeTypes={nodeTypes}
             edgeTypes={edgeTypes}
             fitView={!centerAtNode}
+            panOnScroll={true} // Enables standard scroll for panning and Ctrl+Scroll for zoom
         >
             <Background />
             <Controls />
@@ -452,6 +506,26 @@ function HistoryTreeInner<T>({
                 }}
             >
                 <strong style={{ fontSize: "0.85em", marginBottom: "2px" }}>Focus Branch</strong>
+
+                {/* Auto Recenter Checkbox */}
+                <label
+                    style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "6px",
+                        fontSize: "0.8em",
+                        marginBottom: "4px",
+                        cursor: "pointer",
+                    }}
+                >
+                    <input
+                        type="checkbox"
+                        checked={autoRecenter}
+                        onChange={(e) => setAutoRecenter(e.target.checked)}
+                    />
+                    Auto Recenter
+                </label>
+
                 {Array.from(branches.entries())
                     .sort((a, b) => a[0] - b[0])
                     .map(([branchId, branch]) => {

@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useMemo, useState, useCallback } from "react";
 import { basicSetup } from "codemirror";
 import { EditorView, Decoration, WidgetType } from "@codemirror/view";
+import { CODE_EDITOR_DOM_ID } from "../../autoInsert";
 import { EditorState, StateField, StateEffect, RangeSetBuilder } from "@codemirror/state";
 import type { DecorationSet } from "@codemirror/view";
 import { diffLines, isEndOfFile } from "./diff";
@@ -381,6 +382,7 @@ const inlineButtonsField = StateField.define<DecorationSet>({
 
 // --- BASE EDITOR ---
 interface BaseEditorProps {
+    id?: string;
     code: string;
     readOnly?: boolean;
     cursors?: Cursor[];
@@ -394,6 +396,7 @@ interface BaseEditorProps {
 }
 
 function BaseEditor({
+    id,
     code,
     readOnly,
     cursors,
@@ -476,7 +479,7 @@ function BaseEditor({
         }
     }, [code, cursors, lineDecorations, blockSpacers, inlineButtons, onConquer, onConquerBoth]);
 
-    return <div ref={containerRef} className={styles.baseEditorContainer} />;
+    return <div ref={containerRef} id={id} className={styles.baseEditorContainer} />;
 }
 
 // --- MAIN COMPONENT ---
@@ -667,6 +670,7 @@ export function CodeEditorWithDiff({
                         className={`${styles.leftPane} ${diff ? styles.halfWidth : styles.fullWidth}`}
                     >
                         <BaseEditor
+                            id={CODE_EDITOR_DOM_ID}
                             code={code}
                             cursors={cursors}
                             onChange={onChange}

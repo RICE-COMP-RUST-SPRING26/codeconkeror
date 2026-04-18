@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { startAutoInsert, stopAutoInsert } from "./autoInsert";
 import { ClientDocumentManager, createDocument, newClientId } from "./DocumentManager";
 import type { ClientObservableState, BranchSummary, NodeSummary, EventLogEntry } from "./types";
 
@@ -17,12 +18,6 @@ const LS_CLIENT = "branchedit.clientId";
 const LS_NAME = "branchedit.name";
 const LS_SEND_DELAY = "branchedit.sendDelay";
 
-const LOREM_IPSUM =
-    "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor " +
-    "incididunt ut labore et dolore magna aliqua.\n" +
-    "Ut enim ad minim veniam, quis nostrud " +
-    "exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.\n";
-
 type RightPanel = "debug" | "eventlog" | "history" | "tree" | null;
 
 export default function App() {
@@ -36,6 +31,7 @@ export default function App() {
     });
 
     const [name, setName] = useState(() => localStorage.getItem(LS_NAME) ?? "");
+    const nameRef = useRef(name);
     const [docIdInput, setDocIdInput] = useState("");
     const [docId, setDocId] = useState<string | null>(null);
     const [branches, setBranches] = useState<BranchSummary[]>([]);
@@ -59,8 +55,6 @@ export default function App() {
         return stored !== null ? Number(stored) : 250;
     });
     const sendDelayRef = useRef(sendDelay);
-    const autoInsertRef = useRef<ReturnType<typeof setInterval> | null>(null);
-    const autoInsertPosRef = useRef(0);
     const [isAutoInserting, setIsAutoInserting] = useState(false);
 
     const addEvent = useCallback((entry: Omit<EventLogEntry, "id" | "time">) => {
@@ -81,7 +75,7 @@ export default function App() {
                 docId: id,
                 branchNum: branch,
                 clientId,
-                name,
+                name: nameRef.current,
                 onState: setMainState,
                 onEvent: addEvent,
             });
@@ -90,7 +84,7 @@ export default function App() {
             manager.connect();
             setDocId(id);
         },
-        [clientId, name, addEvent],
+        [clientId, addEvent],
     );
 
     const refreshBranches = useCallback(async () => {
@@ -122,6 +116,7 @@ export default function App() {
     }, [docId, refreshBranches]);
 
     useEffect(() => {
+        nameRef.current = name;
         localStorage.setItem(LS_NAME, name);
         if (managerRef.current) managerRef.current.name = name;
         if (shadowManagerRef.current) shadowManagerRef.current.name = name;
@@ -230,23 +225,14 @@ export default function App() {
     };
 
     const toggleAutoInsert = useCallback(() => {
-        if (autoInsertRef.current !== null) {
-            clearInterval(autoInsertRef.current);
-            autoInsertRef.current = null;
+        if (isAutoInserting) {
+            stopAutoInsert();
             setIsAutoInserting(false);
-            return;
+        } else {
+            startAutoInsert(() => setIsAutoInserting(false));
+            setIsAutoInserting(true);
         }
-        autoInsertPosRef.current = 0;
-        setIsAutoInserting(true);
-        autoInsertRef.current = setInterval(() => {
-            const manager = managerRef.current;
-            if (!manager) return;
-            const pos = autoInsertPosRef.current;
-            const current = manager.displayedContent;
-            void manager.setCurrentState(current + LOREM_IPSUM[pos], current.length + 1);
-            autoInsertPosRef.current = (pos + 1) % LOREM_IPSUM.length;
-        }, 80);
-    }, []);
+    }, [isAutoInserting]);
 
     useEffect(() => {
         return () => {
@@ -303,6 +289,8 @@ export default function App() {
                 currentSeqNum={mainState?.lastCommittedState.seqNum ?? 0}
                 branches={branches}
                 onForkHere={(node) => void forkFromNode(node)}
+                onCompareBranch={(n) => startShadowing(n)}
+                onOpenBranch={(n) => { if (docId) openDocument(docId, n); }}
             />
         );
     }
@@ -381,6 +369,7 @@ export default function App() {
                             <span className="text-gray-600">ms</span>
                         </div>
                         <button
+                            onMouseDown={(e) => e.preventDefault()}
                             onClick={toggleAutoInsert}
                             disabled={!mainState?.initialized}
                             className={`px-3 py-1 rounded text-sm border disabled:opacity-40 ${
