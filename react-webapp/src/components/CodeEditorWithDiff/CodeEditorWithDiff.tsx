@@ -7,6 +7,8 @@ import { diffLines, isEndOfFile } from "./diff";
 
 // Import the CSS Module
 import styles from "./styles.module.css";
+import singleSwordSvg from "../../assets/sword.svg?raw";
+import doubleSwordSvg from "../../assets/double-sword.svg?raw";
 
 export type Cursor = {
     label: string;
@@ -93,12 +95,8 @@ function createButtonControls(
         return btn;
     };
 
-    const singleSword = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 28 28" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M14.5 17.5L3 6V3h3l11.5 11.5"/><line x1="13" y1="19" x2="19" y2="13"/><line x1="16" y1="16" x2="20" y2="20"/><line x1="19" y1="21" x2="21" y2="19"/></svg>`;
-
-    const doubleSword = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 28 28" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-        <g><path d="M14.5 17.5L3 6V3h3l11.5 11.5"/><line x1="13" y1="19" x2="19" y2="13"/><line x1="16" y1="16" x2="20" y2="20"/><line x1="19" y1="21" x2="21" y2="19"/></g>
-        <g transform="translate(28, 0) scale(-1, 1)"><path d="M14.5 17.5L3 6V3h3l11.5 11.5"/><line x1="13" y1="19" x2="19" y2="13"/><line x1="16" y1="16" x2="20" y2="20"/><line x1="19" y1="21" x2="21" y2="19"/></g>
-    </svg>`;
+    const singleSword = singleSwordSvg;
+    const doubleSword = doubleSwordSvg;
 
     container.appendChild(
         createBtn("Conker Changes (Accept New)", singleSword, (e) => {

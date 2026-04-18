@@ -337,7 +337,7 @@ export default function App() {
                         onClick={() => void handleNew()}
                         className="px-3 py-1 bg-green-500 hover:bg-green-600 text-white rounded text-sm"
                     >
-                        New document
+                        New
                     </button>
                     <div className="ml-auto flex items-center gap-3">
                         <div className="flex items-center gap-1.5">
@@ -362,10 +362,21 @@ export default function App() {
                             />
                             <span className="text-gray-600">ms</span>
                         </div>
+                        <button
+                            onClick={toggleAutoInsert}
+                            disabled={!mainState?.initialized}
+                            className={`px-3 py-1 rounded text-sm border disabled:opacity-40 ${
+                                isAutoInserting
+                                    ? "bg-red-100 hover:bg-red-200 border-red-300 text-red-700"
+                                    : "bg-gray-100 hover:bg-gray-200 border-gray-300"
+                            }`}
+                        >
+                            {isAutoInserting ? "Stop auto insert" : "Auto insert"}
+                        </button>
                     </div>
                 </div>
 
-                {/* Row 3: branch controls + auto insert  |  panel buttons + close */}
+                {/* Row 3: branch controls  |  panel buttons + close */}
                 <div className="flex items-center gap-2 text-sm">
                     <BranchControls
                         branches={branches}
@@ -375,17 +386,6 @@ export default function App() {
                         onRefresh={() => void refreshBranches()}
                         onFork={() => void handleFork()}
                     />
-                    <button
-                        onClick={toggleAutoInsert}
-                        disabled={!mainState?.initialized}
-                        className={`px-3 py-1 rounded text-sm border disabled:opacity-40 ${
-                            isAutoInserting
-                                ? "bg-red-100 hover:bg-red-200 border-red-300 text-red-700"
-                                : "bg-gray-100 hover:bg-gray-200 border-gray-300"
-                        }`}
-                    >
-                        {isAutoInserting ? "Stop auto insert" : "Auto insert"}
-                    </button>
                     <div className="ml-auto flex items-center gap-2">
                         {panelBtn("debug", "Debug")}
                         {panelBtn("eventlog", "Event Log")}
@@ -413,7 +413,7 @@ export default function App() {
                                     : "bg-gray-100 hover:bg-gray-200 border-gray-300"
                             }`}
                         >
-                            <option value="">Shadow</option>
+                            <option value="">Compare</option>
                             {branches
                                 .filter((b) => b.branch_num !== currentBranchNum)
                                 .map((b) => (
