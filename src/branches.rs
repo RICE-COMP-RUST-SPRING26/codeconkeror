@@ -346,10 +346,28 @@ impl BranchManager {
         doc_id: DocumentId,
         parent_branch: BranchNum,
         parent_seq: Version,
+        metadata: serde_json::Value,
     ) -> Result<BranchNum, String> {
         let tree = self.get_document_tree(doc_id)?;
-        tree.add_branch(parent_branch, parent_seq)
-            .map_err(|e| format!("{e}"))
+        let new_branch_num = tree
+            .add_branch(parent_branch, parent_seq)
+            .map_err(|e| format!("{e}"))?;
+
+        // Read document content at parent_seq on parent_branch, then create a
+        // retain-all patch as the initial node on the new branch.
+        let content = replay::read_and_apply(&tree, parent_branch, 1, parent_seq)?;
+        let char_count = content.chars().count();
+        let retain_patch = if char_count > 0 {
+            Patch::new(vec![crate::patch::OpComponent::Retain(char_count)])
+        } else {
+            Patch::new(vec![])
+        };
+        let entry = PatchEntry::new(retain_patch, metadata);
+        let bytes = entry.to_bytes();
+        tree.append_to_branch(new_branch_num, &bytes)
+            .map_err(|e| format!("{e}"))?;
+
+        Ok(new_branch_num)
     }
 
     /// If we have a cached `BranchState`, its `seq_num` is authoritative

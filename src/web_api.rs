@@ -330,11 +330,14 @@ struct CreateBranchRequest {
     #[serde(default)]
     parent_branch: Option<BranchNum>,
     parent_seq: Version,
+    #[serde(default)]
+    metadata: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
 struct CreateBranchResponse {
     branch_num: BranchNum,
+    seq: Version,
 }
 
 async fn create_branch(
@@ -344,8 +347,9 @@ async fn create_branch(
 ) -> Result<Json<CreateBranchResponse>, ApiError> {
     let doc_id = parse_doc_id(&doc_id_str)?;
     let parent_branch = req.parent_branch.unwrap_or(0);
-    let branch_num = state.add_branch(doc_id, parent_branch, req.parent_seq)?;
-    Ok(Json(CreateBranchResponse { branch_num }))
+    let metadata = req.metadata.unwrap_or(serde_json::json!({}));
+    let branch_num = state.add_branch(doc_id, parent_branch, req.parent_seq, metadata)?;
+    Ok(Json(CreateBranchResponse { branch_num, seq: req.parent_seq + 1 }))
 }
 
 // ---------------- GET /documents/:doc_id/nodes ----------------

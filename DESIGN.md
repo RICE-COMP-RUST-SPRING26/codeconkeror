@@ -218,10 +218,11 @@ fn create_document(&self, content: &str, metadata: serde_json::Value) -> Result<
 // 2. Add a patch to the logtree adding a new PatchEntry containing content and metadata to the default branch
 // 3. With branches write-locked, add a new entry for the default branch
 
-fn add_branch(&self, docid, parent_branch: BranchNum, parent_seq: Version) -> Result<BranchNum>
+fn add_branch(&self, docid, parent_branch: BranchNum, parent_seq: Version, metadata: serde_json::Value) -> Result<BranchNum>
 // 1. With the storage locked, call get_logtree
 // 2. Call tree.create_branch(parent_branch, parent_seq) to create the new branch
-// 3. Return the new branch number
+// 3. Create a new node on that branch with the provided metadata. It should contain a patch that retains the entire contents of the document at that point.
+// 4. Return the new branch number
 ```
 
 # Module src/web_api.rs
@@ -276,10 +277,10 @@ GET document/DOCID/nodes { branchNum (optional), start: SeqNum, end: SeqNum }
 // 2. Call tree.read_range to get the nodes
 // 3. Parse each node to get the correct format, and return it
 
-POST documents/DOCID/branches { parent_branch (optional, defaults to 0), parent_seq: Version }
--> { branch_num: BranchNum }
-// 1. Call BRANCH_MANAGER.add_branch(doc_id, parent_branch, parent_seq)
-// 2. Return the new branch number
+POST documents/DOCID/branches { parent_branch (optional, defaults to 0), parent_seq: Version, metadata (optional) }
+-> { branch_num: BranchNum, seq: SeqNum }
+// 1. Call BRANCH_MANAGER.add_branch(doc_id, parent_branch, parent_seq, metadata or {})
+// 2. Return the new branch number, and parent_seq+1, because that will be the seq of the initial node on the new branch.
 ```
 
 # Client Synchronization Strategy
