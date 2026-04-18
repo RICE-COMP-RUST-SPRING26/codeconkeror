@@ -1,6 +1,7 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { ClientDocumentManager, createDocument, newClientId } from "./DocumentManager";
 import type { ClientObservableState, BranchSummary, NodeSummary, EventLogEntry } from "./types";
+import { computeAlignedDiff, getMainPaneDecorations, getShadowPaneInfo } from "./diffUtils";
 
 import DocControls from "./components/DocControls";
 import BranchControls from "./components/BranchControls";
@@ -52,6 +53,8 @@ export default function App() {
     const [showHistory, setShowHistory] = useState(false);
     const [historyNodes, setHistoryNodes] = useState<NodeSummary[]>([]);
     const [historyLoading, setHistoryLoading] = useState(false);
+
+    const [syncedScrollTop, setSyncedScrollTop] = useState<number | null>(null);
 
     const [sendDelay, setSendDelay] = useState(0);
     const autoInsertRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -256,6 +259,23 @@ export default function App() {
 
     const currentBranchNum = mainState?.branchNum ?? 0;
 
+    const alignedDiff = useMemo(() => {
+        if (shadowBranchNum === null || !mainState?.initialized || !shadowState?.initialized) return null;
+        return computeAlignedDiff(mainState.displayedContent, shadowState.displayedContent);
+    }, [shadowBranchNum, mainState?.initialized, mainState?.displayedContent, shadowState?.initialized, shadowState?.displayedContent]);
+
+    const mainDiffInfo = useMemo(() =>
+        alignedDiff ? getMainPaneDecorations(alignedDiff.mainLines) : null,
+        [alignedDiff]);
+
+    const shadowDiffInfo = useMemo(() =>
+        alignedDiff ? getShadowPaneInfo(alignedDiff.shadowLines) : null,
+        [alignedDiff]);
+
+    const handleScroll = useCallback((top: number) => {
+        setSyncedScrollTop(top);
+    }, []);
+
     return (
         <div className="min-h-screen bg-gray-50">
             <div className="max-w-6xl mx-auto p-4">
@@ -288,6 +308,10 @@ export default function App() {
                         manager={managerRef.current}
                         state={mainState}
                         label={shadowBranchNum !== null ? `Branch #${currentBranchNum}` : undefined}
+                        lineDecorations={mainDiffInfo?.lineDecorations}
+                        blockSpacers={mainDiffInfo?.blockSpacers}
+                        onScroll={shadowBranchNum !== null ? handleScroll : undefined}
+                        externalScrollTop={shadowBranchNum !== null ? syncedScrollTop : null}
                     />
                     {shadowBranchNum !== null && (
                         <EditorPane
@@ -295,6 +319,10 @@ export default function App() {
                             state={shadowState}
                             label={`Branch #${shadowBranchNum} (shadow)`}
                             readOnly
+                            contentOverride={shadowDiffInfo?.content}
+                            lineDecorations={shadowDiffInfo?.lineDecorations}
+                            onScroll={handleScroll}
+                            externalScrollTop={syncedScrollTop}
                         />
                     )}
                 </div>
@@ -351,6 +379,8 @@ export default function App() {
                         shadowBranchNum={shadowBranchNum}
                         shadowState={shadowState}
                         docId={docId}
+                        branches={branches}
+                        currentBranchNum={currentBranchNum}
                         onInputChange={setShadowInput}
                         onStart={startShadowing}
                         onStop={stopShadowing}

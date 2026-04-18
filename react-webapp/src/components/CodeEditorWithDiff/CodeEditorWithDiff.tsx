@@ -5,7 +5,6 @@ import { EditorState, StateField, StateEffect, RangeSetBuilder } from "@codemirr
 import type { DecorationSet } from "@codemirror/view";
 import { diffLines } from "diff";
 
-// --- TYPES ---
 export type Cursor = {
     label: string;
     pos: number;
@@ -20,24 +19,23 @@ export type CodeEditorWithDiffProps = {
 };
 
 type LineDecoration = { lineIndex: number; className: string };
-type BlockSpacer = { afterLine: number; height: number; text?: string; className?: string };
+type BlockSpacer = { lineNum: number; height: number; text?: string; className?: string };
 
-const LINE_HEIGHT = 24; // Strict line height to ensure absolute alignment
+const DIFF_LINE_HEIGHT = 24;
 
-// --- UTILS ---
-function getCursorColor(label: string): string {
+function clientColor(clientId: string): string {
     let hash = 0;
-    for (let i = 0; i < label.length; i++) {
-        hash = (hash * 31 + label.charCodeAt(i)) & 0x7fffffff;
+    for (let i = 0; i < clientId.length; i++) {
+        hash = (hash * 31 + clientId.charCodeAt(i)) & 0x7fffffff;
     }
     const hue = Math.abs(hash) % 360;
     return `hsl(${hue}, 65%, 50%)`;
 }
 
-// --- CODEMIRROR WIDGETS & EFFECTS ---
+// --- CODEMIRROR WIDGETS ---
 class ExternalCursorWidget extends WidgetType {
     constructor(
-        readonly label: string,
+        readonly name: string,
         readonly color: string,
     ) {
         super();
@@ -45,18 +43,20 @@ class ExternalCursorWidget extends WidgetType {
 
     toDOM(): HTMLElement {
         const wrapper = document.createElement("span");
+        // z-index added to ensure it overlays the CodeMirror line stacking context
         wrapper.style.cssText =
-            "position: relative; display: inline-block; width: 0; overflow: visible; pointer-events: none;";
+            "position: relative; display: inline-block; width: 0; height: 0; vertical-align: top; overflow: visible; pointer-events: none; z-index: 100;";
 
         const bar = document.createElement("span");
-        bar.style.cssText = `position: absolute; top: 0; bottom: -2px; left: 0; width: 2px; background: ${this.color};`;
+        // FIX: Gave the bar an explicit height to match the line, rather than relying on top/bottom
+        bar.style.cssText = `position: absolute; top: 0; left: -1px; width: 2px; height: ${DIFF_LINE_HEIGHT}px; background: ${this.color}; z-index: 100;`;
 
-        const labelEl = document.createElement("span");
-        labelEl.textContent = this.label || "?";
-        labelEl.style.cssText = [
+        const label = document.createElement("span");
+        label.textContent = this.name || "?";
+        label.style.cssText = [
             "position: absolute",
             "bottom: 100%",
-            "left: 0",
+            "left: -1px",
             `background: ${this.color}`,
             "color: white",
             "font-size: 10px",
@@ -66,15 +66,16 @@ class ExternalCursorWidget extends WidgetType {
             "white-space: nowrap",
             "font-family: sans-serif",
             "margin-bottom: 1px",
+            "z-index: 101",
         ].join("; ");
 
-        wrapper.appendChild(labelEl);
+        wrapper.appendChild(label);
         wrapper.appendChild(bar);
         return wrapper;
     }
 
     eq(other: ExternalCursorWidget) {
-        return other.label === this.label && other.color === this.color;
+        return other.name === this.name && other.color === this.color;
     }
 }
 
@@ -90,15 +91,13 @@ class BlockSpacerWidget extends WidgetType {
     toDOM(): HTMLElement {
         const el = document.createElement("div");
         el.style.height = `${this.height}px`;
-        el.style.lineHeight = `${LINE_HEIGHT}px`;
+        el.style.lineHeight = `${DIFF_LINE_HEIGHT}px`;
+        el.className = this.className || "";
         el.style.boxSizing = "border-box";
         el.style.overflow = "hidden";
         el.style.whiteSpace = "pre";
 
-        if (this.className) el.className = this.className;
-
         if (this.text) {
-            // Trim the very last newline from the diff text so it doesn't create an empty overflowing line
             el.textContent = this.text.endsWith("\n") ? this.text.slice(0, -1) : this.text;
         }
         return el;
@@ -108,7 +107,11 @@ class BlockSpacerWidget extends WidgetType {
         return this.height;
     }
     eq(other: BlockSpacerWidget) {
-        return other.height === this.height && other.text === this.text;
+        return (
+            other.height === this.height &&
+            other.text === this.text &&
+            other.className === this.className
+        );
     }
     ignoreEvent() {
         return true;
@@ -135,7 +138,7 @@ const externalCursorsField = StateField.define<DecorationSet>({
                         pos,
                         pos,
                         Decoration.widget({
-                            widget: new ExternalCursorWidget(c.label, getCursorColor(c.label)),
+                            widget: new ExternalCursorWidget(c.label, clientColor(c.label)),
                             side: 1,
                         }),
                     );
@@ -189,23 +192,30 @@ const blockSpacersField = StateField.define<DecorationSet>({
                 const builder = new RangeSetBuilder<Decoration>();
                 if (effect.value.length === 0) return builder.finish();
 
-                const sorted = [...effect.value].sort((a, b) => a.afterLine - b.afterLine);
-                for (const { afterLine, height, text, className } of sorted) {
+                const sorted = [...effect.value].sort((a, b) => a.lineNum - b.lineNum);
+
+                for (const { lineNum, height, text, className } of sorted) {
                     let pos: number;
-                    if (afterLine <= 0) {
+                    let side: number;
+
+                    if (lineNum <= 1) {
                         pos = 0;
+                        side = -1;
+                    } else if (lineNum > tr.newDoc.lines) {
+                        pos = tr.newDoc.length;
+                        side = 1;
                     } else {
-                        const lineNum = afterLine + 1;
-                        if (lineNum > tr.newDoc.lines) continue;
-                        pos = tr.newDoc.line(lineNum).from - 1; // Insert at the very end of the line
+                        pos = tr.newDoc.line(lineNum).from;
+                        side = -1;
                     }
+
                     builder.add(
                         pos,
                         pos,
                         Decoration.widget({
                             widget: new BlockSpacerWidget(height, text, className),
                             block: true,
-                            side: 1,
+                            side: side,
                         }),
                     );
                 }
@@ -241,7 +251,6 @@ function BaseEditor({
     const viewRef = useRef<EditorView | null>(null);
     const isExternalChange = useRef(false);
 
-    // Maintain latest callbacks
     const cbRef = useRef({ onChange, onCursorMove });
     useEffect(() => {
         cbRef.current = { onChange, onCursorMove };
@@ -267,10 +276,10 @@ function BaseEditor({
                 }
             }),
             EditorView.theme({
-                "&": { height: "auto", minHeight: "100%" },
-                ".cm-scroller": { overflow: "visible", fontFamily: "monospace" },
-                ".cm-line": { lineHeight: `${LINE_HEIGHT}px`, whiteSpace: "pre" },
-                ".cm-content": { padding: 0 }, // Prevents drift in alignment between panes
+                "&": { height: "auto", minHeight: "100%", width: "100%" },
+                ".cm-scroller": { overflow: "visible !important", fontFamily: "monospace" },
+                ".cm-line": { lineHeight: `${DIFF_LINE_HEIGHT}px` },
+                ".cm-content": { padding: 0 },
             }),
         ];
 
@@ -319,7 +328,6 @@ export function CodeEditorWithDiff({
     onCursorMove,
     diff,
 }: CodeEditorWithDiffProps) {
-    // Memoize diffing logic so we aren't re-calculating on simple cursor moves
     const diffData = useMemo(() => {
         if (!diff) return null;
 
@@ -335,27 +343,24 @@ export function CodeEditorWithDiff({
             const lineCount = part.count || 0;
 
             if (part.removed) {
-                // Line removed: left code has it, diff code lacks it.
-                // Left shows normally. Right gets a red block spacer at current position showing the text.
                 rightSpacers.push({
-                    afterLine: rightLine - 1,
-                    height: lineCount * LINE_HEIGHT,
+                    lineNum: rightLine,
+                    height: lineCount * DIFF_LINE_HEIGHT,
                     text: part.value,
-                    className: "bg-red-100 text-red-900",
+                    className: "diff-spacer-red",
                 });
                 leftLine += lineCount;
             } else if (part.added) {
-                // Line added: diff code has it, left code lacks it.
-                // Right highlights green. Left gets an empty transparent block spacer to align.
                 for (let i = 0; i < lineCount; i++) {
                     rightLineDecos.push({
                         lineIndex: rightLine - 1 + i,
-                        className: "bg-green-100",
+                        className: "diff-line-green",
                     });
                 }
                 leftSpacers.push({
-                    afterLine: leftLine - 1,
-                    height: lineCount * LINE_HEIGHT,
+                    lineNum: leftLine,
+                    height: lineCount * DIFF_LINE_HEIGHT,
+                    className: "",
                 });
                 rightLine += lineCount;
             } else {
@@ -368,34 +373,55 @@ export function CodeEditorWithDiff({
     }, [code, diff]);
 
     return (
-        <div className="relative w-full h-[600px] overflow-auto border border-gray-300 rounded shadow-sm bg-white text-sm">
-            <div className="absolute top-0 left-0 min-w-full flex min-h-full">
-                {/* LEFT PANE: Original Code */}
-                <div
-                    className={`flex-1 border-r border-gray-200 ${diff ? "w-1/2 max-w-[50%]" : "w-full"}`}
-                >
-                    <BaseEditor
-                        code={code}
-                        cursors={cursors}
-                        onChange={onChange}
-                        onCursorMove={onCursorMove}
-                        blockSpacers={diffData?.leftSpacers}
-                    />
-                </div>
+        <>
+            <style>{`
+        .diff-spacer-red {
+          background-color: rgba(254, 226, 226, 0.6); 
+          color: #7f1d1d; 
+        }
+        .diff-line-green {
+          background-color: rgba(220, 252, 231, 0.6) !important; 
+        }
+      `}</style>
 
-                {/* RIGHT PANE: Diff Code */}
-                {diff && (
-                    <div className="flex-1 w-1/2 max-w-[50%] bg-gray-50 border-l border-gray-200">
+            <div className="relative w-full h-[600px] overflow-auto border border-gray-300 rounded shadow-sm bg-white text-sm">
+                {/*
+          min-w-full and w-max allow the container to hug the largest content, 
+          while flex-1 and min-w-[50%] ensure both columns are exactly identical in width.
+        */}
+                <div
+                    className="min-h-full min-w-full w-max"
+                    style={{ display: "flex", flexDirection: "row" }}
+                >
+                    <div
+                        className={`flex-1 border-r border-gray-200 ${diff ? "" : "w-full"}`}
+                        style={{ minWidth: diff ? "50%" : "100%" }}
+                    >
                         <BaseEditor
-                            code={diff.code}
-                            readOnly={true}
-                            cursors={diff.cursors}
-                            lineDecorations={diffData?.rightLineDecos}
-                            blockSpacers={diffData?.rightSpacers}
+                            code={code}
+                            cursors={cursors}
+                            onChange={onChange}
+                            onCursorMove={onCursorMove}
+                            blockSpacers={diffData?.leftSpacers}
                         />
                     </div>
-                )}
+
+                    {diff && (
+                        <div
+                            className="flex-1 bg-gray-50 border-l border-gray-200 -ml-[1px]"
+                            style={{ minWidth: "50%" }}
+                        >
+                            <BaseEditor
+                                code={diff.code}
+                                readOnly={true}
+                                cursors={diff.cursors}
+                                lineDecorations={diffData?.rightLineDecos}
+                                blockSpacers={diffData?.rightSpacers}
+                            />
+                        </div>
+                    )}
+                </div>
             </div>
-        </div>
+        </>
     );
 }
