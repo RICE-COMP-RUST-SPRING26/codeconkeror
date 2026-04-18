@@ -5,38 +5,52 @@ pub fn apply(patch: &Patch, doc: &str) -> Result<String, String> {
     use OpComponent::*;
 
     let mut result = String::new();
+    let mut chars = doc.chars();
+    let char_count = doc.chars().count();
     let mut pos = 0;
-    let bytes = doc.as_bytes();
+
     for op in &patch.ops {
         match op {
             Retain(n) => {
-                if pos + n > bytes.len() {
+                let n = *n;
+                if pos + n > char_count {
                     return Err(format!(
-                        "retain({n}) at pos {pos} exceeds doc len {}",
-                        bytes.len()
+                        "retain({n}) at pos {pos} exceeds doc char len {}",
+                        char_count
                     ));
                 }
-                result.push_str(&doc[pos..pos + n]);
+                // Push exactly `n` characters to the result
+                for _ in 0..n {
+                    if let Some(c) = chars.next() {
+                        result.push(c);
+                    }
+                }
                 pos += n;
             }
             Insert(s) => {
                 result.push_str(s);
             }
             Delete(n) => {
-                if pos + n > bytes.len() {
+                let n = *n;
+                if pos + n > char_count {
                     return Err(format!(
-                        "delete({n}) at pos {pos} exceeds doc len {}",
-                        bytes.len()
+                        "delete({n}) at pos {pos} exceeds doc char len {}",
+                        char_count
                     ));
+                }
+                // Advance the iterator to drop the deleted characters
+                for _ in 0..n {
+                    chars.next();
                 }
                 pos += n;
             }
         }
     }
-    if pos != bytes.len() {
+
+    if pos != char_count {
         return Err(format!(
-            "patch did not consume entire doc: consumed {pos}, doc len {}",
-            bytes.len()
+            "patch did not consume entire doc: consumed {pos}, doc char len {}",
+            char_count
         ));
     }
     Ok(result)

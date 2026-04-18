@@ -43,7 +43,7 @@ impl Patch {
             .iter()
             .map(|op| match op {
                 OpComponent::Retain(n) => *n,
-                OpComponent::Insert(s) => s.len(),
+                OpComponent::Insert(s) => s.chars().count(), // <-- Fix here
                 OpComponent::Delete(_) => 0,
             })
             .sum()

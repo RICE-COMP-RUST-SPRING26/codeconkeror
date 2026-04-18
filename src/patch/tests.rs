@@ -4,9 +4,9 @@ mod fuzz_tests {
     use crate::patch::builder::PatchBuilder;
 
     use super::super::*;
-    use rand::rngs::StdRng;
     use rand::Rng;
     use rand::SeedableRng;
+    use rand::rngs::StdRng;
 
     /// Generate a random document of lowercase ascii chars.
     fn random_doc(rng: &mut StdRng, max_len: usize) -> String {
@@ -119,19 +119,7 @@ mod diff_tests {
     use OpComponent::*;
 
     fn apply(doc: &str, patch: &Patch) -> String {
-        let mut result = String::new();
-        let mut pos = 0;
-        for op in &patch.ops {
-            match op {
-                Retain(n) => {
-                    result.push_str(&doc[pos..pos + n]);
-                    pos += n;
-                }
-                Insert(s) => result.push_str(s),
-                Delete(n) => pos += n,
-            }
-        }
-        result
+        patch.apply(doc).unwrap()
     }
 
     #[test]
