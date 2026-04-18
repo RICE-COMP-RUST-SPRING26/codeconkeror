@@ -15,6 +15,7 @@ import Logo from "./assets/Logo2.png";
 const SERVER_URL = "http://bore.pub:21213";
 const LS_CLIENT = "branchedit.clientId";
 const LS_NAME = "branchedit.name";
+const LS_SEND_DELAY = "branchedit.sendDelay";
 
 const LOREM_IPSUM =
     "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor " +
@@ -53,7 +54,11 @@ export default function App() {
     const [historyNodes, setHistoryNodes] = useState<NodeSummary[]>([]);
     const [historyLoading, setHistoryLoading] = useState(false);
 
-    const [sendDelay, setSendDelay] = useState(0);
+    const [sendDelay, setSendDelay] = useState(() => {
+        const stored = localStorage.getItem(LS_SEND_DELAY);
+        return stored !== null ? Number(stored) : 250;
+    });
+    const sendDelayRef = useRef(sendDelay);
     const autoInsertRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const autoInsertPosRef = useRef(0);
     const [isAutoInserting, setIsAutoInserting] = useState(false);
@@ -80,12 +85,12 @@ export default function App() {
                 onState: setMainState,
                 onEvent: addEvent,
             });
-            manager.sendDelay = sendDelay;
+            manager.sendDelay = sendDelayRef.current;
             managerRef.current = manager;
             manager.connect();
             setDocId(id);
         },
-        [clientId, name, addEvent, sendDelay],
+        [clientId, name, addEvent],
     );
 
     const refreshBranches = useCallback(async () => {
@@ -123,6 +128,8 @@ export default function App() {
     }, [name]);
 
     useEffect(() => {
+        sendDelayRef.current = sendDelay;
+        localStorage.setItem(LS_SEND_DELAY, String(sendDelay));
         if (managerRef.current) managerRef.current.sendDelay = sendDelay;
     }, [sendDelay]);
 

@@ -95,6 +95,35 @@ export default function HistoryTreeDriver({
         }
     }, [branches, loadBranch]);
 
+    // Auto-append new committed nodes when seqNum advances on the current branch
+    const prevCommitRef = useRef({ branchNum: currentBranchNum, seqNum: currentSeqNum });
+    useEffect(() => {
+        const prev = prevCommitRef.current;
+        const branchChanged = currentBranchNum !== prev.branchNum;
+        prevCommitRef.current = { branchNum: currentBranchNum, seqNum: currentSeqNum };
+
+        // On branch switch or uninitialized state, skip — loadBranch handles initial load
+        if (branchChanged || !manager || prev.seqNum === 0 || currentSeqNum <= prev.seqNum) return;
+
+        const fetchStart = prev.seqNum + 1;
+        const fetchEnd = currentSeqNum;
+        const branchNum = currentBranchNum;
+
+        manager.fetchNodes(fetchStart, fetchEnd, branchNum).then((data) => {
+            if (data.nodes.length === 0) return;
+            setBranchData((prev) => {
+                const existing = prev.get(branchNum);
+                if (!existing) return prev; // not yet loaded; loadBranch will handle it
+                const next = new Map(prev);
+                next.set(branchNum, {
+                    nodes: [...existing.nodes, ...data.nodes],
+                    lowestSeqLoaded: existing.lowestSeqLoaded,
+                });
+                return next;
+            });
+        }).catch((e) => console.error("HistoryTreeDriver auto-update:", e));
+    }, [currentSeqNum, currentBranchNum, manager, setBranchData]);
+
     const treeData = useMemo(() => {
         const map = new Map<
             number,

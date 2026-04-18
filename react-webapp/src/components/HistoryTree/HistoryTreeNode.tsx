@@ -12,7 +12,7 @@ function compactPatchSummary(patch: Patch): string {
             parts.push(`del ${op.delete}`);
         }
     }
-    const full = parts.join(" / ") || "(identity)";
+    const full = parts.join(" / ") || "empty";
     return full.length > 10 ? full.slice(0, 10) + "…" : full;
 }
 
@@ -25,7 +25,7 @@ export default function HistoryTreeNode({ node, onForkHere }: HistoryTreeNodePro
     return (
         <div style={{ display: "flex", alignItems: "center", gap: "4px", fontSize: "9px" }}>
             <span style={{ fontFamily: "monospace", color: "#888", flexShrink: 0 }}>
-                {String(node.seq).padStart(4, "0")}
+                [{String(node.value.branch_num)}] {String(node.seq).padStart(4, "0")}
             </span>
             <span
                 style={{
