@@ -63,58 +63,48 @@ export function isIdentity(patch: Patch): boolean {
 }
 
 export function applyPatch(patch: Patch, doc: string): string {
-  let result = '';
+  const parts: string[] = [];
   let pos = 0;
   for (const op of patch.ops) {
     if ('retain' in op) {
-      result += doc.slice(pos, pos + op.retain);
+      parts.push(doc.slice(pos, pos + op.retain));
       pos += op.retain;
     } else if ('insert' in op) {
-      result += op.insert;
+      parts.push(op.insert);
     } else if ('delete' in op) {
       pos += op.delete;
     }
   }
-  return result;
+  return parts.join('');
 }
 
 export function diffPatches(before: string, after: string): Patch {
-  const n = before.length;
-  const m = after.length;
-  const stride = m + 1;
-  const dp = new Int32Array((n + 1) * stride);
-  for (let i = 1; i <= n; i++) {
-    const bi = before.charCodeAt(i - 1);
-    for (let j = 1; j <= m; j++) {
-      if (bi === after.charCodeAt(j - 1)) {
-        dp[i * stride + j] = dp[(i - 1) * stride + (j - 1)] + 1;
-      } else {
-        const up = dp[(i - 1) * stride + j];
-        const left = dp[i * stride + (j - 1)];
-        dp[i * stride + j] = up > left ? up : left;
-      }
-    }
+  const minLen = Math.min(before.length, after.length);
+
+  let prefixLen = 0;
+  while (prefixLen < minLen && before.charCodeAt(prefixLen) === after.charCodeAt(prefixLen)) {
+    prefixLen++;
   }
 
-  const ops: Op[] = [];
-  let i = n, j = m;
-  while (i > 0 || j > 0) {
-    if (i > 0 && j > 0 && before.charCodeAt(i - 1) === after.charCodeAt(j - 1)) {
-      ops.push({ retain: 1 }); i--; j--;
-    } else if (j > 0 && (i === 0 || dp[i * stride + (j - 1)] >= dp[(i - 1) * stride + j])) {
-      ops.push({ insert: after[j - 1] }); j--;
-    } else {
-      ops.push({ delete: 1 }); i--;
-    }
+  let suffixLen = 0;
+  const maxSuffix = Math.min(before.length - prefixLen, after.length - prefixLen);
+  while (
+    suffixLen < maxSuffix &&
+    before.charCodeAt(before.length - 1 - suffixLen) === after.charCodeAt(after.length - 1 - suffixLen)
+  ) {
+    suffixLen++;
   }
-  ops.reverse();
+
+  const deleteLen = before.length - prefixLen - suffixLen;
+  const insertStr = suffixLen > 0
+    ? after.slice(prefixLen, after.length - suffixLen)
+    : after.slice(prefixLen);
 
   const b = new PatchBuilder();
-  for (const op of ops) {
-    if ('retain' in op) b.retain(op.retain);
-    else if ('insert' in op) b.insert(op.insert);
-    else if ('delete' in op) b.delete(op.delete);
-  }
+  if (prefixLen > 0) b.retain(prefixLen);
+  if (deleteLen > 0) b.delete(deleteLen);
+  if (insertStr) b.insert(insertStr);
+  if (suffixLen > 0) b.retain(suffixLen);
   return b.build();
 }
 
