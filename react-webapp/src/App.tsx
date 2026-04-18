@@ -1,15 +1,16 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { ClientDocumentManager, createDocument, newClientId } from "./DocumentManager";
 import type { ClientObservableState, BranchSummary, NodeSummary, EventLogEntry } from "./types";
-import { computeAlignedDiff, getMainPaneDecorations, getShadowPaneInfo } from "./diffUtils";
 
 import DocControls from "./components/DocControls";
 import BranchControls from "./components/BranchControls";
-import EditorPane from "./components/EditorPane";
+import StatusBar from "./components/StatusBar";
 import ShadowControls from "./components/ShadowControls";
 import DebugPanel from "./components/DebugPanel";
 import HistoryPanel from "./components/HistoryPanel";
 import EventLogPanel from "./components/EventLogPanel";
+import { CodeEditorWithDiff } from "./components/CodeEditorWithDiff/CodeEditorWithDiff";
+import type { Cursor } from "./components/CodeEditorWithDiff/CodeEditorWithDiff";
 import Logo from "./assets/Logo2.png";
 
 const SERVER_URL = "http://bore.pub:21213";
@@ -53,8 +54,6 @@ export default function App() {
     const [showHistory, setShowHistory] = useState(false);
     const [historyNodes, setHistoryNodes] = useState<NodeSummary[]>([]);
     const [historyLoading, setHistoryLoading] = useState(false);
-
-    const [syncedScrollTop, setSyncedScrollTop] = useState<number | null>(null);
 
     const [sendDelay, setSendDelay] = useState(0);
     const autoInsertRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -259,22 +258,18 @@ export default function App() {
 
     const currentBranchNum = mainState?.branchNum ?? 0;
 
-    const alignedDiff = useMemo(() => {
-        if (shadowBranchNum === null || !mainState?.initialized || !shadowState?.initialized) return null;
-        return computeAlignedDiff(mainState.displayedContent, shadowState.displayedContent);
-    }, [shadowBranchNum, mainState?.initialized, mainState?.displayedContent, shadowState?.initialized, shadowState?.displayedContent]);
-
-    const mainDiffInfo = useMemo(() =>
-        alignedDiff ? getMainPaneDecorations(alignedDiff.mainLines) : null,
-        [alignedDiff]);
-
-    const shadowDiffInfo = useMemo(() =>
-        alignedDiff ? getShadowPaneInfo(alignedDiff.shadowLines) : null,
-        [alignedDiff]);
-
-    const handleScroll = useCallback((top: number) => {
-        setSyncedScrollTop(top);
+    const toCursors = useCallback((state: ClientObservableState | null): Cursor[] => {
+        if (!state) return [];
+        return Array.from(state.externalCursors.entries()).map(([clientId, cursor]) => ({
+            label: (cursor.metadata.name as string) || clientId.slice(0, 8),
+            pos: cursor.pos,
+        }));
     }, []);
+
+    const diffProp = useMemo(() => {
+        if (shadowBranchNum === null || !shadowState?.initialized) return null;
+        return { code: shadowState.displayedContent, cursors: toCursors(shadowState) };
+    }, [shadowBranchNum, shadowState, toCursors]);
 
     return (
         <div className="min-h-screen bg-gray-50">
@@ -302,29 +297,18 @@ export default function App() {
                     />
                 </div>
 
-                {/* Editor area: two-pane when shadowing, single pane otherwise */}
-                <div className={shadowBranchNum !== null ? "grid grid-cols-2 gap-4 mb-3" : "mb-3"}>
-                    <EditorPane
-                        manager={managerRef.current}
-                        state={mainState}
-                        label={shadowBranchNum !== null ? `Branch #${currentBranchNum}` : undefined}
-                        lineDecorations={mainDiffInfo?.lineDecorations}
-                        blockSpacers={mainDiffInfo?.blockSpacers}
-                        onScroll={shadowBranchNum !== null ? handleScroll : undefined}
-                        externalScrollTop={shadowBranchNum !== null ? syncedScrollTop : null}
-                    />
-                    {shadowBranchNum !== null && (
-                        <EditorPane
-                            manager={shadowManagerRef.current}
-                            state={shadowState}
-                            label={`Branch #${shadowBranchNum} (shadow)`}
-                            readOnly
-                            contentOverride={shadowDiffInfo?.content}
-                            lineDecorations={shadowDiffInfo?.lineDecorations}
-                            onScroll={handleScroll}
-                            externalScrollTop={syncedScrollTop}
+                {/* Editor area */}
+                <div className="mb-3">
+                    <StatusBar state={mainState} />
+                    <div className="h-[600px]">
+                        <CodeEditorWithDiff
+                            code={mainState?.displayedContent ?? ""}
+                            cursors={toCursors(mainState)}
+                            onChange={(content, cursor) => managerRef.current?.setCurrentState(content, cursor ?? mainState?.cursor ?? 0)}
+                            onCursorMove={(cursor) => managerRef.current?.setCursor(cursor ?? 0)}
+                            diff={diffProp}
                         />
-                    )}
+                    </div>
                 </div>
 
                 {/* Toolbar */}
