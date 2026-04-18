@@ -3,7 +3,7 @@ import { basicSetup } from "codemirror";
 import { EditorView, Decoration, WidgetType } from "@codemirror/view";
 import { EditorState, StateField, StateEffect, RangeSetBuilder } from "@codemirror/state";
 import type { DecorationSet } from "@codemirror/view";
-import { diffLines } from "diff";
+import { diffLines, isEndOfFile } from "./diff";
 
 export type Cursor = {
     label: string;
@@ -34,6 +34,7 @@ type BlockSpacer = {
     height: number;
     text?: string;
     className?: string;
+    endOfFile?: boolean;
     conquerChunk?: DiffChunk;
     onConquer?: (chunk: DiffChunk) => void;
 };
@@ -66,7 +67,7 @@ function createConquerDOMButton(
     btn.style.top = "2px";
     btn.style.left = "2px";
     btn.title = "Conker Changes";
-    btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="2 2 28 28" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M14.5 17.5L3 6V3h3l11.5 11.5"/><line x1="13" y1="19" x2="19" y2="13"/><line x1="16" y1="16" x2="20" y2="20"/><line x1="19" y1="21" x2="21" y2="19"/></svg>`;
+    btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 28 28" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M14.5 17.5L3 6V3h3l11.5 11.5"/><line x1="13" y1="19" x2="19" y2="13"/><line x1="16" y1="16" x2="20" y2="20"/><line x1="19" y1="21" x2="21" y2="19"/></svg>`;
 
     btn.onclick = (e) => {
         e.preventDefault();
@@ -277,17 +278,20 @@ const blockSpacersField = StateField.define<DecorationSet>({
                     height,
                     text,
                     className,
+                    endOfFile,
                     conquerChunk,
                     onConquer,
                 } of sorted) {
                     let pos: number;
                     let side: number;
-                    if (lineNum <= 1) {
-                        pos = 0;
-                        side = -1;
-                    } else if (lineNum > tr.newDoc.lines) {
+                    if (endOfFile || lineNum > tr.newDoc.lines) {
+                        // Anchor after the last character so the user's cursor
+                        // stays above this spacer while they type at the end.
                         pos = tr.newDoc.length;
                         side = 1;
+                    } else if (lineNum <= 1) {
+                        pos = 0;
+                        side = -1;
                     } else {
                         pos = tr.newDoc.line(lineNum).from;
                         side = -1;
@@ -536,6 +540,7 @@ export function CodeEditorWithDiff({
                         lineNum: leftLine,
                         height: lineCount * DIFF_LINE_HEIGHT,
                         className: chunkClass,
+                        endOfFile: isEndOfFile(code, leftLine),
                     });
 
                     currentChunk!.replacementText += part.value;
