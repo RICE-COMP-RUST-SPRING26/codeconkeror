@@ -2,10 +2,8 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { ClientDocumentManager, createDocument, newClientId } from "./DocumentManager";
 import type { ClientObservableState, BranchSummary, NodeSummary, EventLogEntry } from "./types";
 
-import DocControls from "./components/DocControls";
 import BranchControls from "./components/BranchControls";
 import StatusBar from "./components/StatusBar";
-import ShadowControls from "./components/ShadowControls";
 import DebugPanel from "./components/DebugPanel";
 import HistoryPanel from "./components/HistoryPanel";
 import EventLogPanel from "./components/EventLogPanel";
@@ -22,6 +20,8 @@ const LOREM_IPSUM =
     "incididunt ut labore et dolore magna aliqua.\n" +
     "Ut enim ad minim veniam, quis nostrud " +
     "exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.\n";
+
+type RightPanel = "debug" | "eventlog" | "history" | null;
 
 export default function App() {
     const [clientId] = useState(() => {
@@ -43,15 +43,12 @@ export default function App() {
 
     const shadowManagerRef = useRef<ClientDocumentManager | null>(null);
     const [shadowState, setShadowState] = useState<ClientObservableState | null>(null);
-    const [shadowInput, setShadowInput] = useState("");
     const [shadowBranchNum, setShadowBranchNum] = useState<number | null>(null);
 
-    const [debugMode, setDebugMode] = useState(false);
-    const [showEventLog, setShowEventLog] = useState(false);
+    let [rightPanel, setRightPanel] = useState<RightPanel>(null);
     const [eventLog, setEventLog] = useState<EventLogEntry[]>([]);
     const logCounter = useRef(0);
 
-    const [showHistory, setShowHistory] = useState(false);
     const [historyNodes, setHistoryNodes] = useState<NodeSummary[]>([]);
     const [historyLoading, setHistoryLoading] = useState(false);
 
@@ -72,7 +69,6 @@ export default function App() {
             managerRef.current?.disconnect();
             setMainState(null);
             setHistoryNodes([]);
-            setShowHistory(false);
 
             const manager = new ClientDocumentManager({
                 serverUrl: SERVER_URL,
@@ -102,7 +98,6 @@ export default function App() {
         }
     }, []);
 
-    // Hash-based routing
     useEffect(() => {
         const loadFromHash = () => {
             const h = location.hash.replace(/^#/, "").trim();
@@ -120,14 +115,12 @@ export default function App() {
         if (docId) void refreshBranches();
     }, [docId, refreshBranches]);
 
-    // Keep name in sync on manager and persist to localStorage
     useEffect(() => {
         localStorage.setItem(LS_NAME, name);
         if (managerRef.current) managerRef.current.name = name;
         if (shadowManagerRef.current) shadowManagerRef.current.name = name;
     }, [name]);
 
-    // Keep sendDelay in sync
     useEffect(() => {
         if (managerRef.current) managerRef.current.sendDelay = sendDelay;
     }, [sendDelay]);
@@ -168,28 +161,27 @@ export default function App() {
         }
     };
 
-    const loadHistory = async () => {
+    const handleHistoryPanel = async () => {
+        if (rightPanel === "history") {
+            setRightPanel(null);
+            return;
+        }
         const manager = managerRef.current;
         if (!manager || !mainState) return;
-        if (!showHistory) {
-            setHistoryLoading(true);
-            try {
-                const end = mainState.lastCommittedState.seqNum;
-                if (end < 1) {
-                    setHistoryNodes([]);
-                    setShowHistory(true);
-                    return;
-                }
+        setHistoryLoading(true);
+        try {
+            const end = mainState.lastCommittedState.seqNum;
+            if (end >= 1) {
                 const data = await manager.fetchNodes(1, end, mainState.branchNum);
                 setHistoryNodes(data.nodes);
-                setShowHistory(true);
-            } catch (e) {
-                alert("Failed to load history: " + (e as Error).message);
-            } finally {
-                setHistoryLoading(false);
+            } else {
+                setHistoryNodes([]);
             }
-        } else {
-            setShowHistory(false);
+            setRightPanel("history");
+        } catch (e) {
+            alert("Failed to load history: " + (e as Error).message);
+        } finally {
+            setHistoryLoading(false);
         }
     };
 
@@ -205,9 +197,8 @@ export default function App() {
         }
     };
 
-    const startShadowing = () => {
-        const n = parseInt(shadowInput, 10);
-        if (isNaN(n) || !docId) return;
+    const startShadowing = (n: number) => {
+        if (!docId) return;
         shadowManagerRef.current?.disconnect();
         const shadowManager = new ClientDocumentManager({
             serverUrl: SERVER_URL,
@@ -271,136 +262,199 @@ export default function App() {
         return { code: shadowState.displayedContent, cursors: toCursors(shadowState) };
     }, [shadowBranchNum, shadowState, toCursors]);
 
+    const togglePanel = (panel: RightPanel) => {
+        stopShadowing();
+        setRightPanel((prev) => (prev === panel ? null : panel));
+    };
+
+    let rightComponent: React.ReactNode = null;
+    if (rightPanel === "debug" && mainState) {
+        rightComponent = <DebugPanel state={mainState} />;
+    } else if (rightPanel === "eventlog") {
+        rightComponent = <EventLogPanel entries={eventLog} onClear={() => setEventLog([])} />;
+    } else if (rightPanel === "history") {
+        rightComponent = (
+            <HistoryPanel
+                nodes={historyNodes}
+                branches={branches}
+                currentBranchNum={currentBranchNum}
+                loading={historyLoading}
+                visible={true}
+                onToggle={() => setRightPanel(null)}
+                onForkHere={(node) => void forkFromNode(node)}
+                onSwitchBranch={(n) => {
+                    if (docId) openDocument(docId, n);
+                }}
+            />
+        );
+    }
+
+    const panelBtn = (
+        panel: RightPanel,
+        label: string,
+        extraProps?: React.ButtonHTMLAttributes<HTMLButtonElement>,
+    ) => (
+        <button
+            onClick={() => togglePanel(panel)}
+            className={`px-3 py-1 rounded text-sm border ${
+                rightPanel === panel
+                    ? "bg-blue-100 border-blue-300 text-blue-700"
+                    : "bg-gray-100 hover:bg-gray-200 border-gray-300"
+            }`}
+            {...extraProps}
+        >
+            {label}
+        </button>
+    );
+
+    rightComponent = diffProp ? null : rightComponent;
+    rightPanel = diffProp ? null : rightPanel;
     return (
-        <div className="min-h-screen bg-gray-50">
-            <div className="max-w-6xl mx-auto p-4">
-                <img src={Logo} className="h-12 my-2" />
+        <div className="w-screen h-screen flex flex-col overflow-hidden">
+            <header className="flex-shrink-0 bg-white px-4 py-2 flex flex-col gap-1.5">
+                {/* Row 1: Logo centered */}
+                <div className="flex justify-center">
+                    <img src={Logo} className="h-8 flex-shrink-0" />
+                </div>
 
-                <div className="flex flex-col gap-2 mb-3">
-                    <DocControls
-                        docIdInput={docIdInput}
-                        name={name}
-                        onDocIdChange={setDocIdInput}
-                        onNameChange={setName}
-                        onOpen={handleOpen}
-                        onNew={() => void handleNew()}
+                {/* Row 2: doc id + open + new  |  name + patch delay */}
+                <div className="flex items-center gap-2 text-sm">
+                    <input
+                        type="text"
+                        value={docIdInput}
+                        onChange={(e) => setDocIdInput(e.target.value)}
+                        onKeyDown={(e) => e.key === "Enter" && handleOpen()}
+                        placeholder="Doc id (32 hex chars)"
+                        className="border border-gray-300 rounded px-2 py-1 font-mono text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 w-72"
                     />
+                    <button
+                        onClick={handleOpen}
+                        className="px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white rounded text-sm"
+                    >
+                        Open
+                    </button>
+                    <button
+                        onClick={() => void handleNew()}
+                        className="px-3 py-1 bg-green-500 hover:bg-green-600 text-white rounded text-sm"
+                    >
+                        New document
+                    </button>
+                    <div className="ml-auto flex items-center gap-3">
+                        <div className="flex items-center gap-1.5">
+                            <label className="text-gray-600 flex-shrink-0">Your name:</label>
+                            <input
+                                type="text"
+                                value={name}
+                                onChange={(e) => setName(e.target.value)}
+                                placeholder="Anonymous"
+                                className="w-36 border border-gray-300 rounded px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400"
+                            />
+                        </div>
+                        <div className="flex items-center gap-1">
+                            <span className="text-gray-600 flex-shrink-0">Patch delay:</span>
+                            <input
+                                type="number"
+                                min={0}
+                                step={100}
+                                value={sendDelay}
+                                onChange={(e) => setSendDelay(Math.max(0, Number(e.target.value)))}
+                                className="w-20 border border-gray-300 rounded px-1 py-0.5 text-sm"
+                            />
+                            <span className="text-gray-600">ms</span>
+                        </div>
+                    </div>
+                </div>
 
+                {/* Row 3: branch controls + auto insert  |  panel buttons + close */}
+                <div className="flex items-center gap-2 text-sm">
                     <BranchControls
                         branches={branches}
                         currentBranchNum={currentBranchNum}
                         docId={docId}
-                        state={mainState}
                         onBranchChange={handleBranchChange}
                         onRefresh={() => void refreshBranches()}
                         onFork={() => void handleFork()}
                     />
-                </div>
-
-                {/* Editor area */}
-                <div className="mb-3">
-                    <StatusBar state={mainState} />
-                    <div className="h-[600px]">
-                        <CodeEditorWithDiff
-                            code={mainState?.displayedContent ?? ""}
-                            cursors={toCursors(mainState)}
-                            onChange={(content, cursor) => managerRef.current?.setCurrentState(content, cursor ?? mainState?.cursor ?? 0)}
-                            onCursorMove={(cursor) => managerRef.current?.setCursor(cursor ?? 0)}
-                            diff={diffProp}
-                        />
-                    </div>
-                </div>
-
-                {/* Toolbar */}
-                <div className="flex gap-4 mb-3 text-sm items-center flex-wrap">
-                    <label className="flex items-center gap-1 cursor-pointer select-none">
-                        <input
-                            type="checkbox"
-                            checked={debugMode}
-                            onChange={(e) => setDebugMode(e.target.checked)}
-                            className="rounded"
-                        />
-                        Debug
-                    </label>
-                    <label className="flex items-center gap-1 cursor-pointer select-none">
-                        <input
-                            type="checkbox"
-                            checked={showEventLog}
-                            onChange={(e) => setShowEventLog(e.target.checked)}
-                            className="rounded"
-                        />
-                        Event log
-                    </label>
-                    <label className="flex items-center gap-1 select-none">
-                        Patch delay:
-                        <input
-                            type="number"
-                            min={0}
-                            step={100}
-                            value={sendDelay}
-                            onChange={(e) => setSendDelay(Math.max(0, Number(e.target.value)))}
-                            className="w-20 border border-gray-300 rounded px-1 py-0.5 text-sm"
-                        />
-                        ms
-                    </label>
                     <button
                         onClick={toggleAutoInsert}
                         disabled={!mainState?.initialized}
-                        className={`px-3 py-1 rounded text-sm disabled:opacity-40 ${
+                        className={`px-3 py-1 rounded text-sm border disabled:opacity-40 ${
                             isAutoInserting
-                                ? "bg-red-100 hover:bg-red-200 border border-red-300 text-red-700"
-                                : "bg-gray-100 hover:bg-gray-200 border border-gray-300"
+                                ? "bg-red-100 hover:bg-red-200 border-red-300 text-red-700"
+                                : "bg-gray-100 hover:bg-gray-200 border-gray-300"
                         }`}
                     >
                         {isAutoInserting ? "Stop auto insert" : "Auto insert"}
                     </button>
+                    <div className="ml-auto flex items-center gap-2">
+                        {panelBtn("debug", "Debug")}
+                        {panelBtn("eventlog", "Event Log")}
+                        <button
+                            onClick={() => void handleHistoryPanel()}
+                            disabled={historyLoading}
+                            className={`px-3 py-1 rounded text-sm border disabled:opacity-40 ${
+                                rightPanel === "history"
+                                    ? "bg-blue-100 border-blue-300 text-blue-700"
+                                    : "bg-gray-100 hover:bg-gray-200 border-gray-300"
+                            }`}
+                        >
+                            {historyLoading ? "Loading…" : "History"}
+                        </button>
+                        <select
+                            value={shadowBranchNum !== null ? String(shadowBranchNum) : ""}
+                            onChange={(e) => {
+                                if (e.target.value === "") stopShadowing();
+                                else startShadowing(Number(e.target.value));
+                            }}
+                            disabled={!docId}
+                            className={`px-3 py-1 rounded text-sm border disabled:opacity-40 ${
+                                shadowBranchNum !== null
+                                    ? "bg-blue-100 border-blue-300 text-blue-700"
+                                    : "bg-gray-100 hover:bg-gray-200 border-gray-300"
+                            }`}
+                        >
+                            <option value="">Shadow</option>
+                            {branches
+                                .filter((b) => b.branch_num !== currentBranchNum)
+                                .map((b) => (
+                                    <option key={b.branch_num} value={String(b.branch_num)}>
+                                        #{b.branch_num} · head {b.head_seq}
+                                    </option>
+                                ))}
+                        </select>
+                        {(rightPanel !== null || shadowBranchNum !== null) && (
+                            <button
+                                onClick={() => {
+                                    setRightPanel(null);
+                                    stopShadowing();
+                                }}
+                                className="bg-red-100 hover:bg-red-200 border-red-300 text-red-700 px-3 py-1 rounded text-sm border"
+                            >
+                                Close
+                            </button>
+                        )}
+                    </div>
                 </div>
+            </header>
 
-                {/* Shadow controls */}
-                <div className="mb-3 p-2 border border-gray-200 rounded bg-white">
-                    <ShadowControls
-                        shadowInput={shadowInput}
-                        shadowBranchNum={shadowBranchNum}
-                        shadowState={shadowState}
-                        docId={docId}
-                        branches={branches}
-                        currentBranchNum={currentBranchNum}
-                        onInputChange={setShadowInput}
-                        onStart={startShadowing}
-                        onStop={stopShadowing}
+            <div className="flex-1 flex flex-row overflow-hidden p-2">
+                <div className={rightComponent ? "flex-1 w-0" : "flex-1"}>
+                    <CodeEditorWithDiff
+                        code={mainState?.displayedContent ?? ""}
+                        cursors={toCursors(mainState)}
+                        onChange={(content, cursor) =>
+                            managerRef.current?.setCurrentState(
+                                content,
+                                cursor ?? mainState?.cursor ?? 0,
+                            )
+                        }
+                        onCursorMove={(cursor) => managerRef.current?.setCursor(cursor ?? 0)}
+                        diff={diffProp}
                     />
                 </div>
-
-                {/* Debug panel */}
-                {debugMode && mainState && (
-                    <div className="mb-3">
-                        <DebugPanel state={mainState} />
-                    </div>
-                )}
-
-                {/* History */}
-                <div className="mb-3">
-                    <HistoryPanel
-                        nodes={historyNodes}
-                        branches={branches}
-                        currentBranchNum={currentBranchNum}
-                        loading={historyLoading}
-                        visible={showHistory}
-                        onToggle={() => void loadHistory()}
-                        onForkHere={(node) => void forkFromNode(node)}
-                        onSwitchBranch={(n) => {
-                            if (docId) openDocument(docId, n);
-                        }}
-                    />
-                </div>
-
-                {/* Event log */}
-                {showEventLog && (
-                    <div className="mb-3">
-                        <EventLogPanel entries={eventLog} onClear={() => setEventLog([])} />
-                    </div>
-                )}
+                {rightComponent && <div className="flex-1 w-0">{rightComponent}</div>}
             </div>
+            <StatusBar state={mainState} />
         </div>
     );
 }

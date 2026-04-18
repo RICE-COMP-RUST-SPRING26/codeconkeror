@@ -1,17 +1,9 @@
-import type { BranchSummary, ClientObservableState } from '../types';
-
-function connBadgeClass(status: string) {
-  if (status === 'connected') return 'bg-green-100 text-green-800';
-  if (status === 'error') return 'bg-red-100 text-red-800';
-  if (status === 'connecting') return 'bg-yellow-100 text-yellow-800';
-  return 'bg-gray-100 text-gray-800';
-}
+import type { BranchSummary } from '../types';
 
 interface BranchControlsProps {
   branches: BranchSummary[];
   currentBranchNum: number;
   docId: string | null;
-  state: ClientObservableState | null;
   onBranchChange: (n: number) => void;
   onRefresh: () => void;
   onFork: () => void;
@@ -21,7 +13,6 @@ export default function BranchControls({
   branches,
   currentBranchNum,
   docId,
-  state,
   onBranchChange,
   onRefresh,
   onFork,
@@ -57,13 +48,6 @@ export default function BranchControls({
       >
         Fork from current seq
       </button>
-      <div className="ml-auto">
-        {state && (
-          <span className={`px-2 py-1 rounded text-sm font-medium ${connBadgeClass(state.connStatus)}`}>
-            {state.connStatus}
-          </span>
-        )}
-      </div>
     </div>
   );
 }
