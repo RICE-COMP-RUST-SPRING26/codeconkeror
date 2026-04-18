@@ -5,6 +5,9 @@ import { EditorState, StateField, StateEffect, RangeSetBuilder } from "@codemirr
 import type { DecorationSet } from "@codemirror/view";
 import { diffLines, isEndOfFile } from "./diff";
 
+// Import the CSS Module
+import styles from "./styles.module.css";
+
 export type Cursor = {
     label: string;
     pos: number;
@@ -37,12 +40,14 @@ type BlockSpacer = {
     endOfFile?: boolean;
     conquerChunk?: DiffChunk;
     onConquer?: (chunk: DiffChunk) => void;
+    onConquerBoth?: (chunk: DiffChunk) => void;
 };
 
 type InlineButton = {
     pos: number;
     chunk: DiffChunk;
     onConquer?: (chunk: DiffChunk) => void;
+    onConquerBoth?: (chunk: DiffChunk) => void;
 };
 
 const DIFF_LINE_HEIGHT = 24;
@@ -57,24 +62,61 @@ function clientColor(clientId: string): string {
 }
 
 // --- SHARED BUTTON GENERATOR ---
-function createConquerDOMButton(
+function createButtonControls(
     chunk: DiffChunk,
     onConquer: (c: DiffChunk) => void,
-): HTMLButtonElement {
-    const btn = document.createElement("button");
-    // Only basic identifier classes remain. Styling is handled in the <style> block.
-    btn.className = `conquer-btn chunk-btn-${chunk.id}`;
-    btn.style.top = "2px";
-    btn.style.left = "2px";
-    btn.title = "Conker Changes";
-    btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 28 28" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M14.5 17.5L3 6V3h3l11.5 11.5"/><line x1="13" y1="19" x2="19" y2="13"/><line x1="16" y1="16" x2="20" y2="20"/><line x1="19" y1="21" x2="21" y2="19"/></svg>`;
+    onConquerBoth: (c: DiffChunk) => void,
+): HTMLDivElement {
+    const container = document.createElement("div");
 
-    btn.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        onConquer(chunk);
+    // Give the container the absolute positioning that the old single button had
+    // so it anchors correctly to the top-left of the CodeMirror widget wrappers.
+    container.style.position = "absolute";
+    container.style.top = "2px";
+    container.style.left = "2px";
+    container.style.display = "flex";
+    container.style.gap = "4px";
+    container.style.zIndex = "200";
+
+    const createBtn = (title: string, svg: string, onClick: (e: MouseEvent) => void) => {
+        const btn = document.createElement("button");
+
+        // Apply BOTH the CSS module class and the dynamic hover targeting class directly to the button
+        btn.className = `${styles.conquerBtn} chunk-btn-${chunk.id}`;
+        btn.title = title;
+        btn.innerHTML = svg;
+
+        // Override the "absolute" from .conquerBtn so they sit side-by-side in this flex container
+        btn.style.position = "static";
+
+        btn.onclick = onClick;
+        return btn;
     };
-    return btn;
+
+    const singleSword = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 28 28" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M14.5 17.5L3 6V3h3l11.5 11.5"/><line x1="13" y1="19" x2="19" y2="13"/><line x1="16" y1="16" x2="20" y2="20"/><line x1="19" y1="21" x2="21" y2="19"/></svg>`;
+
+    const doubleSword = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 28 28" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+        <g><path d="M14.5 17.5L3 6V3h3l11.5 11.5"/><line x1="13" y1="19" x2="19" y2="13"/><line x1="16" y1="16" x2="20" y2="20"/><line x1="19" y1="21" x2="21" y2="19"/></g>
+        <g transform="translate(28, 0) scale(-1, 1)"><path d="M14.5 17.5L3 6V3h3l11.5 11.5"/><line x1="13" y1="19" x2="19" y2="13"/><line x1="16" y1="16" x2="20" y2="20"/><line x1="19" y1="21" x2="21" y2="19"/></g>
+    </svg>`;
+
+    container.appendChild(
+        createBtn("Conker Changes (Accept New)", singleSword, (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onConquer(chunk);
+        }),
+    );
+
+    container.appendChild(
+        createBtn("Conker Both (Keep Both)", doubleSword, (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onConquerBoth(chunk);
+        }),
+    );
+
+    return container;
 }
 
 // --- CODEMIRROR WIDGETS ---
@@ -88,29 +130,17 @@ class ExternalCursorWidget extends WidgetType {
 
     toDOM(): HTMLElement {
         const wrapper = document.createElement("span");
-        wrapper.style.cssText =
-            "position: relative; display: inline-block; width: 0; height: 0; vertical-align: top; overflow: visible; pointer-events: none; z-index: 100;";
+        wrapper.className = styles.externalCursorWrapper;
 
         const bar = document.createElement("span");
-        bar.style.cssText = `position: absolute; top: 0; left: -1px; width: 2px; height: ${DIFF_LINE_HEIGHT}px; background: ${this.color}; z-index: 100;`;
+        bar.className = styles.externalCursorBar;
+        bar.style.height = `${DIFF_LINE_HEIGHT}px`;
+        bar.style.background = this.color;
 
         const label = document.createElement("span");
+        label.className = styles.externalCursorLabel;
         label.textContent = this.name || "?";
-        label.style.cssText = [
-            "position: absolute",
-            "bottom: 100%",
-            "left: -1px",
-            `background: ${this.color}`,
-            "color: white",
-            "font-size: 10px",
-            "line-height: 1.4",
-            "padding: 1px 4px",
-            "border-radius: 3px 3px 3px 0",
-            "white-space: nowrap",
-            "font-family: sans-serif",
-            "margin-bottom: 1px",
-            "z-index: 101",
-        ].join("; ");
+        label.style.background = this.color;
 
         wrapper.appendChild(label);
         wrapper.appendChild(bar);
@@ -128,23 +158,24 @@ class BlockSpacerWidget extends WidgetType {
         readonly className?: string,
         readonly conquerChunk?: DiffChunk,
         readonly onConquer?: (c: DiffChunk) => void,
+        readonly onConquerBoth?: (c: DiffChunk) => void,
     ) {
         super();
     }
 
     toDOM(): HTMLElement {
         const el = document.createElement("div");
-        el.style.position = "relative";
+        el.className = `${styles.blockSpacer} ${this.className || ""}`;
         el.style.height = `${this.height}px`;
         el.style.lineHeight = `${DIFF_LINE_HEIGHT}px`;
-        el.className = this.className || "";
-        el.style.boxSizing = "border-box";
-        //el.style.overflow = "hidden";
-        el.style.whiteSpace = "pre";
 
-        if (this.conquerChunk && this.onConquer) {
-            const btn = createConquerDOMButton(this.conquerChunk, this.onConquer);
-            el.appendChild(btn);
+        if (this.conquerChunk && this.onConquer && this.onConquerBoth) {
+            const btnGroup = createButtonControls(
+                this.conquerChunk,
+                this.onConquer,
+                this.onConquerBoth,
+            );
+            el.appendChild(btnGroup);
         }
 
         if (this.text) {
@@ -175,17 +206,17 @@ class ConquerInlineWidget extends WidgetType {
     constructor(
         readonly chunk: DiffChunk,
         readonly onConquer: (c: DiffChunk) => void,
+        readonly onConquerBoth: (c: DiffChunk) => void,
     ) {
         super();
     }
 
     toDOM(): HTMLElement {
         const wrapper = document.createElement("span");
-        wrapper.style.cssText =
-            "position: relative; display: inline-block; width: 0; height: 0; vertical-align: top;";
+        wrapper.className = styles.inlineWidgetWrapper;
 
-        const btn = createConquerDOMButton(this.chunk, this.onConquer);
-        wrapper.appendChild(btn);
+        const btnGroup = createButtonControls(this.chunk, this.onConquer, this.onConquerBoth);
+        wrapper.appendChild(btnGroup);
 
         return wrapper;
     }
@@ -281,12 +312,11 @@ const blockSpacersField = StateField.define<DecorationSet>({
                     endOfFile,
                     conquerChunk,
                     onConquer,
+                    onConquerBoth,
                 } of sorted) {
                     let pos: number;
                     let side: number;
                     if (endOfFile || lineNum > tr.newDoc.lines) {
-                        // Anchor after the last character so the user's cursor
-                        // stays above this spacer while they type at the end.
                         pos = tr.newDoc.length;
                         side = 1;
                     } else if (lineNum <= 1) {
@@ -307,6 +337,7 @@ const blockSpacersField = StateField.define<DecorationSet>({
                                 className,
                                 conquerChunk,
                                 onConquer,
+                                onConquerBoth,
                             ),
                             block: true,
                             side,
@@ -331,13 +362,13 @@ const inlineButtonsField = StateField.define<DecorationSet>({
             if (effect.is(setInlineButtonsEffect)) {
                 const builder = new RangeSetBuilder<Decoration>();
                 const sorted = [...effect.value].sort((a, b) => a.pos - b.pos);
-                for (const { pos, chunk, onConquer } of sorted) {
-                    if (!onConquer) continue;
+                for (const { pos, chunk, onConquer, onConquerBoth } of sorted) {
+                    if (!onConquer || !onConquerBoth) continue;
                     builder.add(
                         pos,
                         pos,
                         Decoration.widget({
-                            widget: new ConquerInlineWidget(chunk, onConquer),
+                            widget: new ConquerInlineWidget(chunk, onConquer, onConquerBoth),
                             side: -1,
                         }),
                     );
@@ -361,6 +392,7 @@ interface BaseEditorProps {
     onChange?: (code: string, pos: number) => void;
     onCursorMove?: (pos: number) => void;
     onConquer?: (chunk: DiffChunk) => void;
+    onConquerBoth?: (chunk: DiffChunk) => void;
 }
 
 function BaseEditor({
@@ -373,6 +405,7 @@ function BaseEditor({
     onChange,
     onCursorMove,
     onConquer,
+    onConquerBoth,
 }: BaseEditorProps) {
     const containerRef = useRef<HTMLDivElement>(null);
     const viewRef = useRef<EditorView | null>(null);
@@ -430,19 +463,19 @@ function BaseEditor({
                     setCursorsEffect.of(cursors ?? []),
                     setLineDecosEffect.of(lineDecorations ?? []),
                     setBlockSpacersEffect.of(
-                        (blockSpacers ?? []).map((bs) => ({ ...bs, onConquer })),
+                        (blockSpacers ?? []).map((bs) => ({ ...bs, onConquer, onConquerBoth })),
                     ),
                     setInlineButtonsEffect.of(
-                        (inlineButtons ?? []).map((ib) => ({ ...ib, onConquer })),
+                        (inlineButtons ?? []).map((ib) => ({ ...ib, onConquer, onConquerBoth })),
                     ),
                 ],
             });
         } finally {
             isExternalChange.current = false;
         }
-    }, [code, cursors, lineDecorations, blockSpacers, inlineButtons, onConquer]);
+    }, [code, cursors, lineDecorations, blockSpacers, inlineButtons, onConquer, onConquerBoth]);
 
-    return <div ref={containerRef} className="h-full" />;
+    return <div ref={containerRef} className={styles.baseEditorContainer} />;
 }
 
 // --- MAIN COMPONENT ---
@@ -469,11 +502,41 @@ export function CodeEditorWithDiff({
         [code, onChange],
     );
 
+    const handleConquerBoth = useCallback(
+        (chunk: DiffChunk) => {
+            const originalText = code.slice(chunk.leftCharStart, chunk.leftCharEnd);
+            const replacementText = chunk.replacementText;
+
+            // Ensure formatting cleanly splits the lines regardless of how the chunk ended
+            const fmtOrig = originalText.endsWith("\n")
+                ? originalText
+                : originalText
+                  ? originalText + "\n"
+                  : "";
+            const fmtRepl = replacementText.endsWith("\n")
+                ? replacementText
+                : replacementText
+                  ? replacementText + "\n"
+                  : "";
+
+            const mergeBlock = `<<<<<<< HEAD\n${fmtOrig}=======\n${fmtRepl}>>>>>>> NEW\n`;
+
+            const newCode =
+                code.slice(0, chunk.leftCharStart) + mergeBlock + code.slice(chunk.leftCharEnd);
+
+            const newCursorPos = chunk.leftCharStart + mergeBlock.length;
+            onChange(newCode, newCursorPos);
+            setHoveredChunkId(null);
+        },
+        [code, onChange],
+    );
+
     const diffData = useMemo(() => {
         if (!diff) return null;
 
         const leftSpacers: BlockSpacer[] = [];
         const rightSpacers: BlockSpacer[] = [];
+        const leftLineDecos: LineDecoration[] = [];
         const rightLineDecos: LineDecoration[] = [];
         const inlineButtons: InlineButton[] = [];
         const chunks: DiffChunk[] = [];
@@ -485,82 +548,91 @@ export function CodeEditorWithDiff({
         let leftCharIdx = 0,
             rightCharIdx = 0;
         let virtualLine = 0;
-        let currentChunk: DiffChunk | null = null;
 
-        const finishChunk = () => {
-            if (currentChunk) {
-                chunks.push(currentChunk);
-                currentChunk = null;
-            }
-        };
-
-        for (const part of changes) {
-            const lineCount = part.count || 0;
+        for (let i = 0; i < changes.length; i++) {
+            const part = changes[i];
 
             if (part.removed || part.added) {
-                const isNewChunk = !currentChunk;
-                if (isNewChunk) {
-                    currentChunk = {
-                        id: `chunk-${leftLine}-${rightLine}`,
-                        virtualStartLine: virtualLine,
-                        virtualLineCount: 0,
-                        leftCharStart: leftCharIdx,
-                        leftCharEnd: leftCharIdx,
-                        replacementText: "",
-                    };
+                // 1. Collect all contiguous changes
+                const subChanges = [];
+                let j = i;
+                while (j < changes.length && (changes[j].removed || changes[j].added)) {
+                    subChanges.push(changes[j]);
+                    j++;
+                }
+                i = j - 1;
+
+                const removedParts = subChanges.filter((p) => p.removed);
+                const addedParts = subChanges.filter((p) => p.added);
+
+                const removedLineCount = removedParts.reduce((sum, p) => sum + (p.count || 0), 0);
+                const addedLineCount = addedParts.reduce((sum, p) => sum + (p.count || 0), 0);
+                const maxLines = Math.max(removedLineCount, addedLineCount);
+
+                const chunkId = `chunk-${leftLine}-${rightLine}`;
+                const chunk: DiffChunk = {
+                    id: chunkId,
+                    virtualStartLine: virtualLine,
+                    virtualLineCount: maxLines,
+                    leftCharStart: leftCharIdx,
+                    leftCharEnd:
+                        leftCharIdx + removedParts.reduce((sum, p) => sum + p.value.length, 0),
+                    replacementText: addedParts.reduce((sum, p) => sum + p.value, ""),
+                };
+                chunks.push(chunk);
+                const chunkClass = `chunk-${chunkId}`;
+
+                // 2. Highlight content as Green
+                for (let k = 0; k < removedLineCount; k++) {
+                    leftLineDecos.push({
+                        lineIndex: leftLine - 1 + k,
+                        className: `${styles.diffLineGreen} ${chunkClass}`,
+                    });
+                }
+                for (let k = 0; k < addedLineCount; k++) {
+                    rightLineDecos.push({
+                        lineIndex: rightLine - 1 + k,
+                        className: `${styles.diffLineGreen} ${chunkClass}`,
+                    });
                 }
 
-                const chunkClass = `chunk-${currentChunk!.id}`;
-
-                if (part.removed) {
-                    rightSpacers.push({
-                        lineNum: rightLine,
-                        height: lineCount * DIFF_LINE_HEIGHT,
-                        text: part.value,
-                        className: `diff-spacer-red ${chunkClass}`,
-                        conquerChunk: isNewChunk ? currentChunk! : undefined,
-                    });
-
-                    currentChunk!.leftCharEnd += part.value.length;
-                    leftLine += lineCount;
-                    leftCharIdx += part.value.length;
-                    currentChunk!.virtualLineCount += lineCount;
-                    virtualLine += lineCount;
-                } else if (part.added) {
-                    if (isNewChunk) {
-                        inlineButtons.push({ pos: rightCharIdx, chunk: currentChunk! });
-                    }
-                    for (let i = 0; i < lineCount; i++) {
-                        rightLineDecos.push({
-                            lineIndex: rightLine - 1 + i,
-                            className: `diff-line-green ${chunkClass}`,
-                        });
-                    }
+                // 3. Apply Red Padding
+                if (addedLineCount > removedLineCount) {
                     leftSpacers.push({
-                        lineNum: leftLine,
-                        height: lineCount * DIFF_LINE_HEIGHT,
-                        className: chunkClass,
-                        endOfFile: isEndOfFile(code, leftLine),
+                        lineNum: leftLine + removedLineCount,
+                        height: (addedLineCount - removedLineCount) * DIFF_LINE_HEIGHT,
+                        className: `${styles.diffSpacerRed} ${chunkClass}`,
+                        endOfFile: isEndOfFile(code, leftLine + removedLineCount),
                     });
-
-                    currentChunk!.replacementText += part.value;
-                    rightLine += lineCount;
-                    rightCharIdx += part.value.length;
-                    currentChunk!.virtualLineCount += lineCount;
-                    virtualLine += lineCount;
+                } else if (removedLineCount > addedLineCount) {
+                    rightSpacers.push({
+                        lineNum: rightLine + addedLineCount,
+                        height: (removedLineCount - addedLineCount) * DIFF_LINE_HEIGHT,
+                        className: `${styles.diffSpacerRed} ${chunkClass}`,
+                        conquerChunk: addedLineCount === 0 ? chunk : undefined,
+                    });
                 }
+
+                // 4. Position Buttons
+                if (addedLineCount > 0) {
+                    inlineButtons.push({ pos: rightCharIdx, chunk });
+                }
+
+                leftLine += removedLineCount;
+                rightLine += addedLineCount;
+                leftCharIdx += removedParts.reduce((sum, p) => sum + p.value.length, 0);
+                rightCharIdx += addedParts.reduce((sum, p) => sum + p.value.length, 0);
+                virtualLine += maxLines;
             } else {
-                finishChunk();
-                leftLine += lineCount;
-                rightLine += lineCount;
+                leftLine += part.count || 0;
+                rightLine += part.count || 0;
                 leftCharIdx += part.value.length;
                 rightCharIdx += part.value.length;
-                virtualLine += lineCount;
+                virtualLine += part.count || 0;
             }
         }
-        finishChunk();
 
-        return { leftSpacers, rightSpacers, rightLineDecos, inlineButtons, chunks };
+        return { leftSpacers, rightSpacers, leftLineDecos, rightLineDecos, inlineButtons, chunks };
     }, [code, diff]);
 
     const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -576,75 +648,36 @@ export function CodeEditorWithDiff({
 
     return (
         <>
-            <style>{`
-                .diff-spacer-red { background-color: rgba(254, 226, 226, 0.5) !important; color: #7f1d1d; }
-                .diff-line-green { background-color: rgba(220, 252, 231, 0.5) !important; }
-                
-                /* Pure CSS replacement for the Tailwind button classes */
-                .conquer-btn {
-                    position: absolute;
-                    z-index: 200;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    width: 28px;
-                    height: 28px;
-                    border-radius: 4px;
-                    cursor: pointer;
-                    transition: all 200ms cubic-bezier(0.4, 0, 0.2, 1);
-                    opacity: 0;
-                    padding: 0;
-                    pointer-events: none;
-                    background-color: #eee;
-                    border: 1px solid #888;
-                    color: #222;
-                }
-                .conquer-btn:hover {
-                    background-color: #ddd;
-                }
-
-                ${
-                    hoveredChunkId
-                        ? `
-                .chunk-${hoveredChunkId}.diff-spacer-red { background-color: rgba(254, 226, 226, 0.95) !important; }
-                            .chunk-${hoveredChunkId}.diff-line-green { background-color: rgba(187, 247, 208, 0.95) !important; }
-                
-                /* This toggles the button from hidden to fully interactive & visible */
+            {hoveredChunkId && (
+                <style>{`
+                    .chunk-${hoveredChunkId}.${styles.diffSpacerRed} { background-color: rgba(254, 226, 226, 0.95) !important; }
+                    .chunk-${hoveredChunkId}.${styles.diffLineGreen} { background-color: rgba(187, 247, 208, 0.95) !important; }
                     .chunk-btn-${hoveredChunkId} {
                         opacity: 1 !important;
                         pointer-events: auto !important;
-                        transform: scale(1.1);
+                        transform: scale(1.1) !important; /* <-- Added !important here */
                     }
-                `
-                        : ""
-                }
-                `}</style>
+                    `}</style>
+            )}
 
-            <div
-                ref={scrollContainerRef}
-                className="w-full h-full overflow-auto border border-gray-300 rounded shadow-sm bg-white text-sm"
-            >
-                <div
-                    className="min-h-full min-w-full w-max"
-                    style={{ display: "flex", flexDirection: "row" }}
-                >
+            <div ref={scrollContainerRef} className={styles.container}>
+                <div className={styles.editorWrapper}>
                     <div
-                        className={`flex-1 border-r border-gray-200 ${diff ? "" : "w-full"}`}
-                        style={{ minWidth: diff ? "50%" : "100%" }}
+                        className={`${styles.leftPane} ${diff ? styles.halfWidth : styles.fullWidth}`}
                     >
                         <BaseEditor
                             code={code}
                             cursors={cursors}
                             onChange={onChange}
                             onCursorMove={onCursorMove}
+                            lineDecorations={diffData?.leftLineDecos}
                             blockSpacers={diffData?.leftSpacers}
                         />
                     </div>
 
                     {diff && (
                         <div
-                            className="relative flex-1 bg-gray-50 border-l border-gray-200 -ml-[1px]"
-                            style={{ minWidth: "50%" }}
+                            className={styles.rightPane}
                             onMouseMove={handleMouseMove}
                             onMouseLeave={() => setHoveredChunkId(null)}
                         >
@@ -656,6 +689,7 @@ export function CodeEditorWithDiff({
                                 blockSpacers={diffData?.rightSpacers}
                                 inlineButtons={diffData?.inlineButtons}
                                 onConquer={handleConquer}
+                                onConquerBoth={handleConquerBoth}
                             />
                         </div>
                     )}
