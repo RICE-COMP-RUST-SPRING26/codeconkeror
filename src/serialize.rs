@@ -7,11 +7,6 @@ pub fn serialize<S: Serializer>(patch: &Patch, serializer: S) -> Result<S::Ok, S
     serialize_patch(patch, serializer)
 }
 
-/// Serde entry-point for deserializing `Patch`, usable as `#[serde(with = "crate::serialize")]`.
-pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Patch, D::Error> {
-    deserialize_patch(deserializer)
-}
-
 /// Serialize a `Patch` as `{ "ops": [{ "retain"|"delete"|"insert": … }, …] }`.
 pub fn serialize_patch<S: Serializer>(patch: &Patch, serializer: S) -> Result<S::Ok, S::Error> {
     use serde::ser::SerializeMap;
@@ -46,7 +41,10 @@ pub mod option_patch {
     use super::*;
 
     /// Serialize `Some(patch)` the same way as a bare `Patch`; `None` becomes JSON `null`.
-    pub fn serialize<S: Serializer>(patch: &Option<Patch>, serializer: S) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(
+        patch: &Option<Patch>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
         match patch {
             Some(p) => serialize_patch(p, serializer),
             None => serializer.serialize_none(),
@@ -54,14 +52,18 @@ pub mod option_patch {
     }
 
     /// Deserialize `null` as `None`; any other value is parsed as a `Patch`.
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Patch>, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Patch>, D::Error> {
         let opt = Option::<serde_json::Value>::deserialize(deserializer)?;
         match opt {
             None => Ok(None),
             Some(v) => {
                 let s = v.to_string();
                 let mut de = serde_json::Deserializer::from_str(&s);
-                deserialize_patch(&mut de).map(Some).map_err(serde::de::Error::custom)
+                deserialize_patch(&mut de)
+                    .map(Some)
+                    .map_err(serde::de::Error::custom)
             }
         }
     }

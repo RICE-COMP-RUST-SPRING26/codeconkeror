@@ -79,11 +79,6 @@ impl<'a> OpIter<'a> {
             None
         }
     }
-
-    /// Return `true` when all components have been fully consumed.
-    fn is_done(&self) -> bool {
-        self.index >= self.ops.len()
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

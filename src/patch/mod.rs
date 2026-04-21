@@ -38,18 +38,6 @@ impl Patch {
             .sum()
     }
 
-    /// The length of the document after this patch is applied.
-    pub fn output_len(&self) -> usize {
-        self.ops
-            .iter()
-            .map(|op| match op {
-                OpComponent::Retain(n) => *n,
-                OpComponent::Insert(s) => s.chars().count(), // <-- Fix here
-                OpComponent::Delete(_) => 0,
-            })
-            .sum()
-    }
-
     /// Transform `self` and `other` (both targeting the same base document) into
     /// `(self', other')` such that applying them in either order yields the same result (TP1).
     pub fn transform(&self, other: &Patch) -> Result<(Patch, Patch), String> {
