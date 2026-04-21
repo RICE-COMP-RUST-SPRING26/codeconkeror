@@ -18,6 +18,7 @@ const TAG_DELETE: u8 = 0x02;
 const TAG_INSERT: u8 = 0x03;
 
 impl OpComponent {
+    /// Append the binary encoding of this component to `buf`.
     fn encode(&self, buf: &mut Vec<u8>) {
         match self {
             OpComponent::Retain(n) => {
@@ -36,6 +37,7 @@ impl OpComponent {
         }
     }
 
+    /// Decode one component from `data` starting at `*pos`, advancing `*pos` past it.
     fn decode(data: &[u8], pos: &mut usize) -> Result<Self, String> {
         if *pos >= data.len() {
             return Err("unexpected end of data reading tag".into());
@@ -69,6 +71,7 @@ impl OpComponent {
 }
 
 impl Patch {
+    /// Serialize the patch to its compact binary representation.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         for op in &self.ops {
@@ -77,6 +80,7 @@ impl Patch {
         buf
     }
 
+    /// Deserialize a patch from its compact binary representation.
     pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
         let mut ops = Vec::new();
         let mut pos = 0;
@@ -87,6 +91,8 @@ impl Patch {
     }
 }
 
+/// A patch together with the wall-clock timestamp and user-supplied metadata
+/// it was committed with.
 #[derive(Debug, Clone)]
 pub struct PatchEntry {
     pub patch: Patch,
@@ -95,6 +101,7 @@ pub struct PatchEntry {
 }
 
 impl PatchEntry {
+    /// Create a new entry, stamping it with the current wall-clock time in milliseconds.
     pub fn new(patch: Patch, metadata: serde_json::Value) -> Self {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -107,6 +114,7 @@ impl PatchEntry {
         }
     }
 
+    /// Serialize the entry to bytes: `[timestamp u64 LE][metadata JSON][patch bytes]`.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(&self.timestamp.to_le_bytes());
@@ -126,6 +134,7 @@ impl PatchEntry {
         buf
     }
 
+    /// Deserialize a `PatchEntry` from the format written by [`to_bytes`].
     pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
         if data.len() < 8 {
             return Err("patch entry too short for timestamp".into());
@@ -134,7 +143,8 @@ impl PatchEntry {
 
         // Parse one JSON value starting at byte 8, then pick up where it ended.
         let tail = &data[8..];
-        let mut stream = serde_json::Deserializer::from_slice(tail).into_iter::<serde_json::Value>();
+        let mut stream =
+            serde_json::Deserializer::from_slice(tail).into_iter::<serde_json::Value>();
         let metadata = match stream.next() {
             Some(Ok(v)) => v,
             Some(Err(e)) => return Err(format!("invalid metadata json: {e}")),
@@ -154,6 +164,7 @@ impl PatchEntry {
     }
 }
 
+/// Read a little-endian `u32` from `data` at `*pos`, advancing `*pos` by 4.
 fn read_u32_le(data: &[u8], pos: &mut usize) -> Result<u32, String> {
     if *pos + 4 > data.len() {
         return Err("unexpected end of data reading u32".into());

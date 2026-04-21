@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
 
+use once_map::OnceMap;
 use serde::Serialize;
 
 use crate::encoding::PatchEntry;
@@ -9,13 +10,16 @@ use crate::patch::Patch;
 use crate::replay;
 use crate::types::{Branch as BranchNum, ClientId, DocumentId, DocumentPos, Version};
 
+/// Maximum number of recent patches kept in the in-memory ring buffer per branch.
 const CACHE_CAPACITY: usize = 512;
 
 // ==================== Events ====================
 
+/// An event sent over SSE to connected clients whenever branch state changes.
 #[derive(Serialize, Clone, Debug)]
 #[serde(tag = "type")]
 pub enum BranchEvent {
+    /// A patch (and/or cursor update) from another client has been committed.
     #[serde(rename = "external_update")]
     ExternalUpdate {
         // Present iff a patch was committed
@@ -33,25 +37,32 @@ pub enum BranchEvent {
         cursor_removed: bool,
         metadata: serde_json::Value,
     },
+    /// Confirmation sent back to the originating client after their patch is committed.
     #[serde(rename = "confirm_patch")]
     ConfirmPatch {
         seqnum: Version,
+        /// OT-rebased versions of the patches committed between the client's
+        /// `prev_seq_num` and the newly committed patch.  The client must apply
+        /// these (in order) after its own original patch to converge with the server.
         rebased: Vec<SerializedPatch>,
     },
 }
 
+/// Wrapper that carries a `Patch` through JSON serialization.
 #[derive(Serialize, Clone, Debug)]
 pub struct SerializedPatch {
     #[serde(with = "crate::serialize")]
     pub patch: Patch,
 }
 
-pub type SendFn =
-    Arc<dyn Fn(BranchEvent) -> Result<(), BroadcastError> + Send + Sync + 'static>;
+/// Function signature for sending a [`BranchEvent`] to a subscriber.
+pub type SendFn = Arc<dyn Fn(BranchEvent) -> Result<(), BroadcastError> + Send + Sync + 'static>;
 
+/// Error returned when a broadcast send fails (the receiving channel was dropped).
 #[derive(Debug)]
 pub struct BroadcastError;
 
+/// A live SSE connection to a specific client.
 pub struct Broadcaster {
     pub client_id: ClientId,
     pub send: SendFn,
@@ -59,31 +70,48 @@ pub struct Broadcaster {
 
 // ==================== Branch ====================
 
+/// The last-known cursor position for a connected client.
 pub struct BranchCursor {
     pub position: DocumentPos,
+    /// Metadata from the most recent patch request that moved this cursor.
     pub metadata: serde_json::Value,
 }
 
+/// Mutable runtime state for an open branch (held behind a `Mutex`).
 pub struct BranchState {
+    /// Current document content (result of replaying all committed patches).
     pub snapshot: String,
+    /// Most recent cursor position reported by each connected client.
     pub cursors: HashMap<ClientId, BranchCursor>,
+    /// All live SSE connections subscribed to this branch.
     pub connections: Vec<Broadcaster>,
+    /// Sequence number of the most recently committed patch on this branch.
     pub seq_num: Version,
+    /// Ring buffer of the `CACHE_CAPACITY` most recently committed patches,
+    /// keyed by their sequence number.  Used to avoid disk reads during OT.
     pub cached_patches: VecDeque<(Version, Patch)>,
 }
 
+/// A single branch within a document, combining its persistent logtree handle
+/// with in-memory collaborative state.
 pub struct Branch {
     pub tree: Arc<LogTree>,
     pub branch_num: BranchNum,
     pub state: Mutex<BranchState>,
 }
 
+/// Returned by [`Branch::patch`] to the HTTP handler.
 pub struct PatchResult {
+    /// Sequence number after the patch was committed (or current head if no patch was sent).
     pub new_seq: Version,
+    /// OT-rebased versions of patches committed ahead of this one, which the
+    /// originating client must apply to converge.
     pub rebased: Vec<Patch>,
 }
 
 impl Branch {
+    /// Create a new in-memory branch wrapping `tree` at the given `seq_num` and
+    /// initial `content`.
     pub fn new(
         tree: Arc<LogTree>,
         branch_num: BranchNum,
@@ -103,12 +131,22 @@ impl Branch {
         })
     }
 
+    /// Register a new SSE subscriber and return the current `(seq_num, snapshot)`
+    /// so the caller can emit an `Init` event before streaming further updates.
     pub fn add_connection(&self, broadcaster: Broadcaster) -> (Version, String) {
         let mut st = self.state.lock().unwrap();
         st.connections.push(broadcaster);
         (st.seq_num, st.snapshot.clone())
     }
 
+    /// Apply an incoming patch (and/or cursor update) from a client.
+    ///
+    /// Performs OT against all patches committed since `prev_seq_num`, appends
+    /// the rebased patch to the logtree, updates the in-memory snapshot, and
+    /// broadcasts the appropriate events to all live connections.
+    ///
+    /// Returns the new sequence number and the rebased history the client needs
+    /// in order to converge with the server.
     pub fn patch(
         &self,
         client_id: ClientId,
@@ -137,7 +175,13 @@ impl Branch {
             pos
         });
         if let Some(pos) = rebased_cursor {
-            st.cursors.insert(client_id, BranchCursor { position: pos, metadata: metadata.clone() });
+            st.cursors.insert(
+                client_id,
+                BranchCursor {
+                    position: pos,
+                    metadata: metadata.clone(),
+                },
+            );
         }
 
         // OT the incoming patch against each committed patch.
@@ -172,10 +216,13 @@ impl Branch {
             (None, Vec::new(), None)
         };
 
-        // Broadcast
+        // Send updates to all clients
         let originator_client_id = format!("{:032x}", client_id);
-        let rebased_serialized: Vec<SerializedPatch> =
-            rebased.iter().cloned().map(|p| SerializedPatch { patch: p }).collect();
+        let rebased_serialized: Vec<SerializedPatch> = rebased
+            .iter()
+            .cloned()
+            .map(|p| SerializedPatch { patch: p })
+            .collect();
 
         // Track connections that failed so we can clean up cursors afterwards.
         let mut dead_clients: Vec<ClientId> = Vec::new();
@@ -183,7 +230,10 @@ impl Branch {
         st.connections.retain(|conn| {
             let event = if conn.client_id == client_id {
                 if let Some(seq) = new_seq {
-                    BranchEvent::ConfirmPatch { seqnum: seq, rebased: rebased_serialized.clone() }
+                    BranchEvent::ConfirmPatch {
+                        seqnum: seq,
+                        rebased: rebased_serialized.clone(),
+                    }
                 } else {
                     return true; // cursor-only: no need to echo back to sender
                 }
@@ -218,7 +268,7 @@ impl Branch {
                         patch: None,
                         client_id: dead_id_str.clone(),
                         cursor: None,
-                    cursor_removed: true,
+                        cursor_removed: true,
                         metadata: serde_json::json!({}),
                     };
                     (conn.send)(event).is_ok()
@@ -226,10 +276,17 @@ impl Branch {
             }
         }
 
-        Ok(PatchResult { new_seq: new_seq.unwrap_or(st.seq_num), rebased })
+        Ok(PatchResult {
+            new_seq: new_seq.unwrap_or(st.seq_num),
+            rebased,
+        })
     }
 }
 
+/// Fetch committed patches on `branch_num` in the range `(after_seq, state.seq_num]`.
+///
+/// Checks the in-memory ring buffer first; falls back to reading from disk if
+/// the cache does not cover the full requested range.
 fn collect_patches(
     tree: &LogTree,
     branch_num: BranchNum,
@@ -271,51 +328,57 @@ fn collect_patches(
 
 // ==================== BranchManager ====================
 
+/// Coordinates access to multiple branches across multiple documents.
+///
+/// Thread-safe: branches are opened lazily and cached for the lifetime of the
+/// process.
 pub struct BranchManager {
-    branches: RwLock<HashMap<(DocumentId, BranchNum), Arc<Branch>>>,
+    branches: OnceMap<(DocumentId, BranchNum), Arc<Branch>>,
     storage: Mutex<LogtreeStorage>,
 }
 
 impl BranchManager {
+    /// Create a manager backed by the given storage.
     pub fn new(storage: LogtreeStorage) -> Self {
         Self {
-            branches: RwLock::new(HashMap::new()),
+            branches: OnceMap::new(),
             storage: Mutex::new(storage),
         }
     }
 
+    /// Load (or return the cached) logtree for `doc_id`.
     pub fn get_document_tree(&self, doc_id: DocumentId) -> Result<Arc<LogTree>, String> {
         let mut storage = self.storage.lock().unwrap();
         storage.get_logtree(doc_id)
     }
 
+    /// Open (or return the cached) branch for `(doc_id, branch_num)`.
+    ///
+    /// On first access, replays the entire branch history to build the current
+    /// in-memory snapshot.
     pub fn open_branch(
         &self,
         doc_id: DocumentId,
         branch_num: BranchNum,
     ) -> Result<Arc<Branch>, String> {
-        {
-            let branches = self.branches.read().unwrap();
-            if let Some(b) = branches.get(&(doc_id, branch_num)) {
-                return Ok(b.clone());
-            }
-        }
+        let mut arc: Option<Arc<Branch>> = None;
+        let arc_ref = &mut arc;
+        let _entry = self
+            .branches
+            .try_insert::<String>((doc_id, branch_num), move |_| {
+                let tree = self.get_document_tree(doc_id)?;
+                let head_seq = tree.branch_head(branch_num).map_err(|e| format!("{e}"))?;
+                let content = replay::calculate_document_content(&tree, branch_num)?;
 
-        let tree = self.get_document_tree(doc_id)?;
-        let head_seq = tree
-            .branch_head(branch_num)
-            .map_err(|e| format!("{e}"))?;
-        let content = replay::calculate_document_content(&tree, branch_num)?;
-
-        let mut branches = self.branches.write().unwrap();
-        if let Some(b) = branches.get(&(doc_id, branch_num)) {
-            return Ok(b.clone());
-        }
-        let branch = Branch::new(tree, branch_num, head_seq, content);
-        branches.insert((doc_id, branch_num), branch.clone());
-        Ok(branch)
+                let branch = Branch::new(tree, branch_num, head_seq, content);
+                *arc_ref = Some(branch.clone());
+                return Ok(branch);
+            })?;
+        return Ok(arc.unwrap());
     }
 
+    /// Create a new document from `content`, writing an initial patch to the
+    /// logtree and caching the resulting branch.
     pub fn create_document(
         &self,
         content: &str,
@@ -336,11 +399,14 @@ impl BranchManager {
             .map_err(|e| format!("{e}"))?;
 
         let branch = Branch::new(tree, branch_num, 1, content.to_string());
-        let mut branches = self.branches.write().unwrap();
-        branches.insert((doc_id, branch_num), branch);
+        self.branches.insert((doc_id, branch_num), |_| branch);
         Ok(doc_id)
     }
 
+    /// Create a new branch forking off `parent_branch` at `parent_seq`.
+    ///
+    /// The new branch's first node is a retain-all patch so that replaying it
+    /// from scratch yields the correct document content at the fork point.
     pub fn add_branch(
         &self,
         doc_id: DocumentId,
@@ -374,8 +440,7 @@ impl BranchManager {
     /// (see ISSUES.md §1 re: logtree off-by-one). Otherwise return None so
     /// the caller falls back to the on-disk head.
     pub fn cached_head_seq(&self, doc_id: DocumentId, branch_num: BranchNum) -> Option<Version> {
-        let branches = self.branches.read().unwrap();
-        let b = branches.get(&(doc_id, branch_num))?;
+        let b = self.branches.get(&(doc_id, branch_num))?;
         Some(b.state.lock().unwrap().seq_num)
     }
 }

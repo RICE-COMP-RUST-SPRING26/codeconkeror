@@ -16,6 +16,7 @@ mod web_api;
 use branches::BranchManager;
 use logtrees::LogtreeStorage;
 
+/// CLI arguments parsed from the command line.
 #[derive(Parser)]
 struct Args {
     /// Directory to store document data
@@ -27,6 +28,7 @@ struct Args {
     port: u16,
 }
 
+/// Initialise storage, build the Axum router, and start the HTTP server.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();

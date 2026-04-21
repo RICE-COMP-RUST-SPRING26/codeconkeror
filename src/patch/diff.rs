@@ -1,6 +1,7 @@
 use super::builder::PatchBuilder;
 use super::*;
 
+/// Compute a minimal patch that transforms `before` into `after` using LCS-based diff.
 pub fn diff(before: &str, after: &str) -> Patch {
     // Collect strings into Vec<char> so we diff by whole characters
     let b: Vec<char> = before.chars().collect();

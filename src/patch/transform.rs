@@ -9,6 +9,7 @@ struct OpIter<'a> {
 }
 
 impl<'a> OpIter<'a> {
+    /// Create an iterator positioned at the start of `ops`.
     fn new(ops: &'a [OpComponent]) -> Self {
         OpIter {
             ops,
@@ -79,6 +80,7 @@ impl<'a> OpIter<'a> {
         }
     }
 
+    /// Return `true` when all components have been fully consumed.
     fn is_done(&self) -> bool {
         self.index >= self.ops.len()
     }
@@ -118,32 +120,27 @@ pub fn transform(a: &Patch, b: &Patch) -> Result<(Patch, Patch), String> {
         let type_a = iter_a.peek_type();
         let type_b = iter_b.peek_type();
 
-        if type_a.is_none() && type_b.is_none() {
-            break;
-        }
-
-        // If `a` inserts here, it goes into a' as-is, and b' must retain over it.
-        // (a has priority on tie-break)
-        if type_a == Some(ComponentType::Insert) {
-            let s = iter_a.take_insert().unwrap();
-            let len = s.len();
-            a_prime.insert(&s);
-            b_prime.retain(len);
-            continue;
-        }
-
-        // If `b` inserts here, it goes into b' as-is, and a' must retain over it.
-        if type_b == Some(ComponentType::Insert) {
-            let s = iter_b.take_insert().unwrap();
-            let len = s.len();
-            b_prime.insert(&s);
-            a_prime.retain(len);
-            continue;
-        }
-
         // Both sides are now Retain or Delete (consuming input chars).
         // We need to figure out how many characters to process together.
         match (type_a, type_b) {
+            (None, None) => break,
+            // If `a` inserts here, it goes into a' as-is, and b' must retain over it.
+            // (a has priority on tie-break)
+            (Some(ComponentType::Insert), _) => {
+                let s = iter_a.take_insert().unwrap();
+                let len = s.len();
+                a_prime.insert(&s);
+                b_prime.retain(len);
+                continue;
+            }
+            // If `b` inserts here, it goes into b' as-is, and a' must retain over it.
+            (_, Some(ComponentType::Insert)) => {
+                let s = iter_b.take_insert().unwrap();
+                let len = s.len();
+                b_prime.insert(&s);
+                a_prime.retain(len);
+                continue;
+            }
             (Some(ComponentType::Retain), Some(ComponentType::Retain)) => {
                 let (chunk_a, _chunk_b) = take_min_pair(&mut iter_a, &mut iter_b);
                 let n = retain_len(&chunk_a);
@@ -172,7 +169,6 @@ pub fn transform(a: &Patch, b: &Patch) -> Result<(Patch, Patch), String> {
             (None, Some(_)) | (Some(_), None) => {
                 return Err("patches are misaligned — one side finished early".to_string());
             }
-            _ => unreachable!(),
         }
     }
 
@@ -189,6 +185,7 @@ fn take_min_pair(a: &mut OpIter, b: &mut OpIter) -> (OpComponent, OpComponent) {
     (ca, cb)
 }
 
+/// Number of input characters remaining in the current (non-insert) component of `iter`.
 fn remaining_len(iter: &OpIter) -> usize {
     match iter.ops.get(iter.index) {
         Some(OpComponent::Retain(n)) | Some(OpComponent::Delete(n)) => n - iter.offset,
@@ -196,6 +193,7 @@ fn remaining_len(iter: &OpIter) -> usize {
     }
 }
 
+/// Extract the character count from a `Retain` component (0 for any other variant).
 fn retain_len(op: &OpComponent) -> usize {
     match op {
         OpComponent::Retain(n) => *n,
@@ -203,6 +201,7 @@ fn retain_len(op: &OpComponent) -> usize {
     }
 }
 
+/// Extract the character count from a `Delete` component (0 for any other variant).
 fn delete_len(op: &OpComponent) -> usize {
     match op {
         OpComponent::Delete(n) => *n,
@@ -215,6 +214,7 @@ mod tests {
     use super::*;
     use OpComponent::*;
 
+    /// Apply `patch` to `doc` by walking ops directly (test helper, avoids the apply module).
     fn apply(doc: &str, patch: &Patch) -> String {
         let mut result = String::new();
         let mut pos = 0;

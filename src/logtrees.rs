@@ -8,12 +8,14 @@ use crate::types::DocumentId;
 
 pub type LogTree = OnDiskTree<FilePagesStorage>;
 
+/// In-memory cache of open logtrees, backed by files in a single directory.
 pub struct LogtreeStorage {
     logtrees: HashMap<DocumentId, Arc<LogTree>>,
     directory: PathBuf,
 }
 
 impl LogtreeStorage {
+    /// Open (or create) the storage directory and return an empty cache.
     pub fn new<P: AsRef<Path>>(directory: P) -> std::io::Result<Self> {
         let dir = directory.as_ref().to_path_buf();
         std::fs::create_dir_all(&dir)?;
@@ -23,10 +25,12 @@ impl LogtreeStorage {
         })
     }
 
+    /// Canonical path for the on-disk file storing document `doc_id`.
     fn file_path(&self, doc_id: DocumentId) -> PathBuf {
         self.directory.join(format!("{:032x}.db", doc_id))
     }
 
+    /// Return the logtree for `doc_id`, loading it from disk on first access.
     pub fn get_logtree(&mut self, doc_id: DocumentId) -> Result<Arc<LogTree>, String> {
         if let Some(t) = self.logtrees.get(&doc_id) {
             return Ok(t.clone());
@@ -51,6 +55,7 @@ impl LogtreeStorage {
         Ok(arc)
     }
 
+    /// Allocate a new document ID, create its on-disk file, and cache the tree.
     pub fn create_logtree(&mut self) -> Result<Arc<LogTree>, String> {
         let doc_id: DocumentId = rand::random();
         let path = self.file_path(doc_id);

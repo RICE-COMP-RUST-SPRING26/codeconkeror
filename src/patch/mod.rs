@@ -22,6 +22,7 @@ pub struct Patch {
 }
 
 impl Patch {
+    /// Create a patch from a pre-built list of components.
     pub fn new(ops: Vec<OpComponent>) -> Self {
         Patch { ops }
     }
@@ -49,6 +50,8 @@ impl Patch {
             .sum()
     }
 
+    /// Transform `self` and `other` (both targeting the same base document) into
+    /// `(self', other')` such that applying them in either order yields the same result (TP1).
     pub fn transform(&self, other: &Patch) -> Result<(Patch, Patch), String> {
         return transform(self, other);
     }

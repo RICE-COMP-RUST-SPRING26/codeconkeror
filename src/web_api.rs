@@ -10,31 +10,43 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::StreamExt;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::branches::{BranchEvent, BranchManager, BroadcastError, Broadcaster, SerializedPatch};
-use crate::types::DocumentPos;
 use crate::encoding::PatchEntry;
 use crate::patch::Patch;
+use crate::types::DocumentPos;
 use crate::types::{Branch as BranchNum, ClientId, DocumentId, Version};
 
+/// Shared application state injected into every Axum handler.
 pub type AppState = Arc<BranchManager>;
 
+/// Build the Axum router, wiring all REST endpoints to `state`.
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/documents", post(create_document))
-        .route("/documents/{doc_id}", get(get_document).patch(patch_document))
-        .route("/documents/{doc_id}/branches", get(list_branches).post(create_branch))
+        .route(
+            "/documents/{doc_id}",
+            get(get_document).patch(patch_document),
+        )
+        .route(
+            "/documents/{doc_id}/branches",
+            get(list_branches).post(create_branch),
+        )
         .route("/documents/{doc_id}/nodes", get(list_nodes))
-    // Support the `document/` (no s) spellings from the design spec too.
-        .route("/document/{doc_id}/branches", get(list_branches).post(create_branch))
+        // Support the `document/` (no s) spellings from the design spec too.
+        .route(
+            "/document/{doc_id}/branches",
+            get(list_branches).post(create_branch),
+        )
         .route("/document/{doc_id}/nodes", get(list_nodes))
         .with_state(state)
 }
 
 // ---------------- Helpers ----------------
 
+/// A structured HTTP error that serializes as `{ "error": "…" }`.
 #[derive(Debug)]
 struct ApiError(StatusCode, String);
 
@@ -51,6 +63,7 @@ impl From<String> for ApiError {
     }
 }
 
+/// Parse a 32-hex-character document ID, returning a 400 error on failure.
 fn parse_doc_id(s: &str) -> Result<DocumentId, ApiError> {
     u128::from_str_radix(s, 16).map_err(|e| {
         ApiError(
@@ -60,6 +73,7 @@ fn parse_doc_id(s: &str) -> Result<DocumentId, ApiError> {
     })
 }
 
+/// Parse a 32-hex-character client ID, returning a descriptive error string on failure.
 fn parse_client_id(s: &str) -> Result<ClientId, String> {
     u128::from_str_radix(s, 16).map_err(|e| format!("invalid client_id: {e}"))
 }
@@ -78,6 +92,7 @@ struct CreateDocResponse {
     doc_id: String,
 }
 
+/// `POST /documents` — create a new document from an initial content string.
 async fn create_document(
     State(state): State<AppState>,
     Json(req): Json<CreateDocRequest>,
@@ -115,6 +130,9 @@ struct GetDocResponse {
     branch_num: BranchNum,
 }
 
+/// `GET /documents/:doc_id` — return the current content and sequence number.
+///
+/// If `mode=subscribe` is present in the query string, upgrades to an SSE stream.
 async fn get_document(
     State(state): State<AppState>,
     Path(doc_id_str): Path<String>,
@@ -134,11 +152,12 @@ async fn get_document(
         seq_num: st.seq_num,
         branch_num,
     })
-       .into_response())
+    .into_response())
 }
 
 // ---------------- SSE subscribe ----------------
 
+/// Top-level SSE envelope: either the initial state or an ongoing branch event.
 #[derive(Serialize)]
 #[serde(tag = "event")]
 enum SseEvent {
@@ -152,11 +171,11 @@ enum SseEvent {
     Branch(BranchEvent),
 }
 
-async fn subscribe(
-    state: AppState,
-    doc_id: DocumentId,
-    q: DocQuery,
-) -> Result<Response, ApiError> {
+/// Upgrade a GET request to a long-lived SSE stream for the given branch.
+///
+/// Sends an `Init` event with the current snapshot, then forwards every
+/// subsequent [`BranchEvent`] until the client disconnects.
+async fn subscribe(state: AppState, doc_id: DocumentId, q: DocQuery) -> Result<Response, ApiError> {
     let branch_num = q.branch_num.unwrap_or(0);
     let client_id_str = q.client_id.ok_or_else(|| {
         ApiError(
@@ -179,7 +198,12 @@ async fn subscribe(
     };
 
     // Register and grab initial state atomically
-    log::info!("subscribe doc {:032x} branch {} client {:032x}", doc_id, branch_num, client_id);
+    log::info!(
+        "subscribe doc {:032x} branch {} client {:032x}",
+        doc_id,
+        branch_num,
+        client_id
+    );
     let (init_seq, init_content) = branch.add_connection(broadcaster);
 
     // Build SSE stream: first yield an Init event, then pipe BranchEvents.
@@ -188,9 +212,7 @@ async fn subscribe(
         content: init_content,
         branch_num,
     };
-    let init_stream = futures::stream::once(async move {
-        to_sse_event(&init_evt)
-    });
+    let init_stream = futures::stream::once(async move { to_sse_event(&init_evt) });
 
     let branch_stream =
         UnboundedReceiverStream::new(rx).map(|e| to_sse_event(&SseEvent::Branch(e)));
@@ -204,11 +226,12 @@ async fn subscribe(
     let headers = response.headers_mut();
     headers.insert("Cache-Control", "no-cache, no-store".parse().unwrap());
     headers.insert("X-Accel-Buffering", "no".parse().unwrap());
-    headers.insert("Access-Control-Allow-Origin","*".parse().unwrap());
+    headers.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
 
     Ok(response)
 }
 
+/// Serialize an [`SseEvent`] to a raw SSE `data:` frame.
 fn to_sse_event(evt: &SseEvent) -> Result<Event, Infallible> {
     let json = serde_json::to_string(evt).unwrap_or_else(|_| "{}".to_string());
     Ok(Event::default().data(json))
@@ -236,6 +259,7 @@ struct PatchResponse {
     rebased: Vec<SerializedPatch>,
 }
 
+/// `PATCH /documents/:doc_id` — submit a patch (and/or cursor update) from a client.
 async fn patch_document(
     State(state): State<AppState>,
     Path(doc_id_str): Path<String>,
@@ -255,7 +279,10 @@ async fn patch_document(
     let branch = state.open_branch(doc_id, branch_num)?;
     log::info!(
         "patch doc {:032x} branch {} client {:032x} prev_seq {}",
-        doc_id, branch_num, client_id, req.prev_seq_num
+        doc_id,
+        branch_num,
+        client_id,
+        req.prev_seq_num
     );
     let result = branch
         .patch(client_id, req.prev_seq_num, req.patch, req.cursor, metadata)
@@ -288,6 +315,7 @@ struct BranchSummary {
     parent_seq: Option<Version>,
 }
 
+/// `GET /documents/:doc_id/branches` — list all branches and their head sequence numbers.
 async fn list_branches(
     State(state): State<AppState>,
     Path(doc_id_str): Path<String>,
@@ -305,6 +333,8 @@ async fn list_branches(
                 format!("branch {branch_num} has no head seq"),
             )
         })?;
+        // Prefer the cached seq_num when available; it may be ahead of the
+        // on-disk head due to a logtree flush lag (see ISSUES.md §1).
         let head = state
             .cached_head_seq(doc_id, branch_num)
             .unwrap_or(disk_head);
@@ -340,6 +370,7 @@ struct CreateBranchResponse {
     seq: Version,
 }
 
+/// `POST /documents/:doc_id/branches` — create a new branch forking from `parent_seq`.
 async fn create_branch(
     State(state): State<AppState>,
     Path(doc_id_str): Path<String>,
@@ -349,7 +380,11 @@ async fn create_branch(
     let parent_branch = req.parent_branch.unwrap_or(0);
     let metadata = req.metadata.unwrap_or(serde_json::json!({}));
     let branch_num = state.add_branch(doc_id, parent_branch, req.parent_seq, metadata)?;
-    Ok(Json(CreateBranchResponse { branch_num, seq: req.parent_seq + 1 }))
+    // The initial retain-all node on the new branch is at parent_seq + 1.
+    Ok(Json(CreateBranchResponse {
+        branch_num,
+        seq: req.parent_seq + 1,
+    }))
 }
 
 // ---------------- GET /documents/:doc_id/nodes ----------------
@@ -376,6 +411,7 @@ struct NodeSummary {
     metadata: serde_json::Value,
 }
 
+/// `GET /documents/:doc_id/nodes` — return raw patch entries for a sequence range.
 async fn list_nodes(
     State(state): State<AppState>,
     Path(doc_id_str): Path<String>,

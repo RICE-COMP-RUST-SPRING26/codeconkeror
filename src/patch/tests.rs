@@ -55,7 +55,7 @@ mod fuzz_tests {
     }
 
     #[test]
-    fn fuzz_tp1() {
+    fn random_test_tp1() {
         let seed: u64 = 12345;
         let mut rng = StdRng::seed_from_u64(seed);
         let num_iterations = 10_000;
@@ -111,6 +111,55 @@ mod fuzz_tests {
             );
         }
     }
+
+    #[test]
+    fn random_test_tp1_seq() {
+        let seed: u64 = 12345;
+        let mut rng = StdRng::seed_from_u64(seed);
+        let num_iterations = 50;
+        let max_doc_len = 50;
+        let patch_count = 100;
+
+        for _ in 0..num_iterations {
+            let doc = random_doc(&mut rng, max_doc_len);
+            let doc_len = doc.len();
+
+            let patches = std::iter::repeat_n((), patch_count)
+                .map(|()| random_patch(&mut rng, doc_len))
+                .collect::<Vec<_>>();
+
+            let mut canonical_patches: Vec<Patch> = vec![];
+            let mut rebase_lists: Vec<Vec<Patch>> = vec![];
+
+            for p in &patches {
+                let mut list = vec![];
+                let mut acc = p.clone();
+                for canonical in &canonical_patches {
+                    let (acc_prime, canonical_prime) = acc.transform(canonical).unwrap();
+                    list.push(canonical_prime);
+                    acc = acc_prime;
+                }
+                rebase_lists.push(list);
+                canonical_patches.push(acc);
+            }
+
+            for (i, p) in patches.iter().enumerate() {
+                // First, apply all canonical patches up to and including i
+                let mut doc1 = doc.clone();
+                for canonical in &canonical_patches[0..=i] {
+                    doc1 = canonical.apply(&doc1).unwrap();
+                }
+                // Then, apply p followed by the rebased canonical patches
+                let mut doc2 = p.apply(&doc).unwrap();
+                assert_eq!(i, rebase_lists[i].len());
+                for transformed in &rebase_lists[i] {
+                    doc2 = transformed.apply(&doc2).unwrap();
+                }
+
+                assert_eq!(doc1, doc2);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -118,6 +167,7 @@ mod diff_tests {
     use super::super::*;
     use OpComponent::*;
 
+    /// Apply a patch to a document string, panicking on error (test helper).
     fn apply(doc: &str, patch: &Patch) -> String {
         patch.apply(doc).unwrap()
     }

@@ -7,10 +7,12 @@ pub struct PatchBuilder {
 }
 
 impl PatchBuilder {
+    /// Create an empty builder.
     pub fn new() -> Self {
         PatchBuilder { ops: Vec::new() }
     }
 
+    /// Append a retain of `n` characters, merging with the preceding retain if any.
     pub fn retain(&mut self, n: usize) {
         if n == 0 {
             return;
@@ -22,6 +24,7 @@ impl PatchBuilder {
         }
     }
 
+    /// Append an insert of string `s`, merging with the preceding insert if any.
     pub fn insert(&mut self, s: &str) {
         if s.is_empty() {
             return;
@@ -33,6 +36,7 @@ impl PatchBuilder {
         }
     }
 
+    /// Append a delete of `n` characters, merging with the preceding delete if any.
     pub fn delete(&mut self, n: usize) {
         if n == 0 {
             return;
@@ -44,6 +48,7 @@ impl PatchBuilder {
         }
     }
 
+    /// Consume the builder and return the normalized `Patch`.
     pub fn build(self) -> Patch {
         Patch { ops: self.ops }
     }
