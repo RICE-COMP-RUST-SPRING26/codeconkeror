@@ -209,6 +209,15 @@ export class ClientDocumentManager {
             this._rebasedDispatched = null;
             this.queued = identityPatch(content.length);
             this.initialized = true;
+
+            this.externalCursors.clear();
+            const initCursors = (data.cursors as Array<{ client_id: string; position: number; metadata: Record<string, unknown> }> | undefined) ?? [];
+            for (const c of initCursors) {
+                if (c.client_id !== this.clientId) {
+                    this.externalCursors.set(c.client_id, { pos: c.position, metadata: c.metadata });
+                }
+            }
+
             this.onEventCb({
                 direction: "in",
                 type: "init",

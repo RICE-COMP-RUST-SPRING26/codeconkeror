@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use crate::branches::{BranchEvent, BranchManager, BroadcastError, Broadcaster, SerializedPatch};
+use crate::branches::{BranchEvent, BranchManager, BroadcastError, Broadcaster, CursorSnapshot, SerializedPatch};
 use crate::encoding::PatchEntry;
 use crate::patch::Patch;
 use crate::types::DocumentPos;
@@ -157,6 +157,14 @@ async fn get_document(
 
 // ---------------- SSE subscribe ----------------
 
+/// Cursor entry included in the `Init` SSE event.
+#[derive(Serialize)]
+struct InitCursorEntry {
+    client_id: String,
+    position: DocumentPos,
+    metadata: serde_json::Value,
+}
+
 /// Top-level SSE envelope: either the initial state or an ongoing branch event.
 #[derive(Serialize)]
 #[serde(tag = "event")]
@@ -166,6 +174,7 @@ enum SseEvent {
         seq_num: Version,
         content: String,
         branch_num: BranchNum,
+        cursors: Vec<InitCursorEntry>,
     },
     #[serde(rename = "branch")]
     Branch(BranchEvent),
@@ -204,13 +213,23 @@ async fn subscribe(state: AppState, doc_id: DocumentId, q: DocQuery) -> Result<R
         branch_num,
         client_id
     );
-    let (init_seq, init_content) = branch.add_connection(broadcaster);
+    let (init_seq, init_content, init_cursors) = branch.add_connection(broadcaster);
+
+    let cursors: Vec<InitCursorEntry> = init_cursors
+        .into_iter()
+        .map(|CursorSnapshot { client_id: cid, position, metadata }| InitCursorEntry {
+            client_id: format!("{:032x}", cid),
+            position,
+            metadata,
+        })
+        .collect();
 
     // Build SSE stream: first yield an Init event, then pipe BranchEvents.
     let init_evt = SseEvent::Init {
         seq_num: init_seq,
         content: init_content,
         branch_num,
+        cursors,
     };
     let init_stream = futures::stream::once(async move { to_sse_event(&init_evt) });
 

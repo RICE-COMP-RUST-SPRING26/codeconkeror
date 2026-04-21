@@ -68,6 +68,13 @@ pub struct Broadcaster {
     pub send: SendFn,
 }
 
+/// Cursor position snapshot returned as part of the `Init` SSE event.
+pub struct CursorSnapshot {
+    pub client_id: ClientId,
+    pub position: DocumentPos,
+    pub metadata: serde_json::Value,
+}
+
 // ==================== Branch ====================
 
 /// The last-known cursor position for a connected client.
@@ -131,12 +138,24 @@ impl Branch {
         })
     }
 
-    /// Register a new SSE subscriber and return the current `(seq_num, snapshot)`
+    /// Register a new SSE subscriber and return the current `(seq_num, snapshot, cursors)`
     /// so the caller can emit an `Init` event before streaming further updates.
-    pub fn add_connection(&self, broadcaster: Broadcaster) -> (Version, String) {
+    pub fn add_connection(
+        &self,
+        broadcaster: Broadcaster,
+    ) -> (Version, String, Vec<CursorSnapshot>) {
         let mut st = self.state.lock().unwrap();
         st.connections.push(broadcaster);
-        (st.seq_num, st.snapshot.clone())
+        let cursors = st
+            .cursors
+            .iter()
+            .map(|(&client_id, c)| CursorSnapshot {
+                client_id,
+                position: c.position,
+                metadata: c.metadata.clone(),
+            })
+            .collect();
+        (st.seq_num, st.snapshot.clone(), cursors)
     }
 
     /// Apply an incoming patch (and/or cursor update) from a client.
@@ -360,10 +379,8 @@ impl BranchManager {
         &self,
         doc_id: DocumentId,
         branch_num: BranchNum,
-    ) -> Result<Arc<Branch>, String> {
-        let mut arc: Option<Arc<Branch>> = None;
-        let arc_ref = &mut arc;
-        let _entry = self
+    ) -> Result<&Branch, String> {
+        let entry = self
             .branches
             .try_insert::<String>((doc_id, branch_num), move |_| {
                 let tree = self.get_document_tree(doc_id)?;
@@ -371,10 +388,9 @@ impl BranchManager {
                 let content = replay::calculate_document_content(&tree, branch_num)?;
 
                 let branch = Branch::new(tree, branch_num, head_seq, content);
-                *arc_ref = Some(branch.clone());
                 return Ok(branch);
             })?;
-        return Ok(arc.unwrap());
+        return Ok(entry);
     }
 
     /// Create a new document from `content`, writing an initial patch to the
